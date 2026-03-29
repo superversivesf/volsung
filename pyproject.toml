@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "volsung"
+version = "1.0.0"
+description = "Voice synthesis server for Qwen3-TTS - give voice to your text"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Skaldforge Team"}
+]
+keywords = ["tts", "voice-synthesis", "qwen", "fastapi"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.23.0",
+    "torch>=2.0.0",
+    "transformers>=4.52.0",
+    "qwen-tts",
+    "soundfile>=0.12.0",
+    "pydantic>=2.0.0",
+    "numpy>=1.24.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/anomaly/volsung"
+Documentation = "https://github.com/anomaly/volsung#readme"
+Repository = "https://github.com/anomaly/volsung"
+
+[project.scripts]
+volsung = "volsung.server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]

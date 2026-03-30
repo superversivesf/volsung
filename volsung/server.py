@@ -22,7 +22,6 @@ from qwen_tts import Qwen3TTSModel
 from volsung.tts.endpoints import router as tts_router
 from volsung.music.endpoints import router as music_router
 from volsung.sfx.endpoints import router as sfx_router
-from volsung.stitcher.endpoints import router as stitcher_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,7 +40,6 @@ app = FastAPI(
 app.include_router(tts_router)
 app.include_router(music_router)
 app.include_router(sfx_router)
-app.include_router(stitcher_router)
 
 voice_design_model = None
 base_model = None
@@ -97,11 +95,9 @@ class HealthResponse(BaseModel):
     base_model: bool
     music_model: bool
     sfx_model: bool
-    stitcher_module: bool
     tts_router: bool
     music_router: bool
     sfx_router: bool
-    stitcher_router: bool
 
 
 class PreloadResponse(BaseModel):
@@ -178,70 +174,6 @@ class SFXGenerateResponse(BaseModel):
     audio: str
     sample_rate: int
     metadata: SFXMetadata
-
-
-# ============================================================================
-# Stitcher Composition Models
-# ============================================================================
-
-
-class TrackAudio(BaseModel):
-    """Audio segment for a track."""
-
-    audio: str
-    duration: float
-    sample_rate: int
-
-
-class Track(BaseModel):
-    """Track in a timeline."""
-
-    track_id: str
-    track_type: str
-    audio: TrackAudio
-    start_time: float
-    end_time: float | None = None
-    volume: float = 1.0
-    fade_in_duration: float = 0.0
-    fade_out_duration: float = 0.0
-
-
-class Timeline(BaseModel):
-    """Timeline containing tracks for composition."""
-
-    timeline_id: str
-    name: str
-    duration: float
-    sample_rate: int
-    tracks: list[Track]
-
-
-class StitcherCompositionRequest(BaseModel):
-    """Request for composing audio from timeline."""
-
-    timeline: Timeline
-    output_format: str = "wav"
-    normalize: bool = True
-    normalize_target_db: float = -1.0
-
-
-class CompositionMetadata(BaseModel):
-    """Metadata for composed audio."""
-
-    timeline_id: str
-    duration: float
-    sample_rate: int
-    num_tracks: int
-    processing_time_ms: float
-
-
-class StitcherCompositionResponse(BaseModel):
-    """Response containing composed audio."""
-
-    audio: str
-    sample_rate: int
-    duration: float
-    metadata: CompositionMetadata
 
 
 def get_device():
@@ -428,8 +360,6 @@ async def startup_event():
     logger.info("  POST /music/generate   - Generate music from description")
     logger.info("  POST /sfx/generate     - Generate sound effects")
     logger.info("  POST /sfx/layer        - Generate layered SFX")
-    logger.info("  POST /stitcher/compose - Compose audio from timeline")
-    logger.info("  GET  /stitcher/health  - Stitcher module health")
     logger.info("  GET  /music/info       - Music module info")
     logger.info("  GET  /sfx/health       - SFX module health")
     logger.info("=" * 60)
@@ -445,11 +375,9 @@ async def health():
         base_model=base_model is not None,
         music_model=music_model is not None,
         sfx_model=sfx_model is not None,
-        stitcher_module=True,  # Stitcher is always available
         tts_router=True,
         music_router=True,
         sfx_router=True,
-        stitcher_router=True,
     )
 
 
@@ -578,69 +506,6 @@ async def documentation() -> Dict[str, Any]:
                     ],
                 },
             },
-            "POST /stitcher/compose": {
-                "description": "Compose audio from a timeline of tracks (TTS, music, SFX)",
-                "input": {
-                    "timeline": {
-                        "timeline_id": "Unique identifier for the timeline",
-                        "name": "Timeline name",
-                        "duration": "Total duration in seconds",
-                        "sample_rate": "Sample rate (typically 24000)",
-                        "tracks": "Array of Track objects with audio, timing, and effects",
-                    },
-                    "output_format": "Output format: wav, mp3, ogg, flac (default: wav)",
-                    "normalize": "Whether to normalize audio (default: true)",
-                    "normalize_target_db": "Target dB for normalization (default: -1.0)",
-                },
-                "output": {
-                    "audio": "Base64-encoded composed audio",
-                    "sample_rate": 24000,
-                    "duration": "Total duration in seconds",
-                    "metadata": {
-                        "timeline_id": "Timeline identifier",
-                        "duration": "Total duration",
-                        "sample_rate": 24000,
-                        "num_tracks": "Number of tracks in composition",
-                        "processing_time_ms": "Processing time in milliseconds",
-                    },
-                },
-                "example": {
-                    "timeline": {
-                        "timeline_id": "scene-1",
-                        "name": "Opening Scene",
-                        "duration": 30.0,
-                        "sample_rate": 24000,
-                        "tracks": [
-                            {
-                                "track_id": "bg-music",
-                                "track_type": "music",
-                                "audio": {
-                                    "audio": "<base64-music-audio>",
-                                    "duration": 30.0,
-                                    "sample_rate": 24000,
-                                },
-                                "start_time": 0.0,
-                                "volume": 0.5,
-                            },
-                            {
-                                "track_id": "narration",
-                                "track_type": "tts",
-                                "audio": {
-                                    "audio": "<base64-tts-audio>",
-                                    "duration": 5.0,
-                                    "sample_rate": 24000,
-                                },
-                                "start_time": 2.0,
-                                "volume": 1.0,
-                                "fade_in_duration": 0.3,
-                                "fade_out_duration": 0.3,
-                            },
-                        ],
-                    },
-                    "output_format": "wav",
-                    "normalize": True,
-                },
-            },
             "POST /voice/design": {
                 "description": "Generate voice sample from description (new router)",
                 "input": {
@@ -687,15 +552,6 @@ async def documentation() -> Dict[str, Any]:
                     "idle_seconds": "Time since last use",
                 },
             },
-            "GET /stitcher/health": {
-                "description": "Check stitcher module health status",
-                "output": {
-                    "status": "healthy",
-                    "composer_ready": "Whether composer is ready",
-                    "max_tracks": "Maximum tracks supported",
-                    "supported_formats": ["wav", "mp3", "ogg", "flac"],
-                },
-            },
         },
         "workflows": {
             "voice_cloning": {
@@ -713,17 +569,9 @@ async def documentation() -> Dict[str, Any]:
                     "1. Generate TTS audio using /voice/design + /voice/synthesize",
                     "2. Generate background music using /music/generate",
                     "3. Generate sound effects using /sfx/generate or /sfx/layer",
-                    "4. Compose final audio using /stitcher/compose with timeline",
-                    "5. Result: Mixed audiobook chapter",
+                    "4. Result: Mixed audiobook chapter",
                 ],
             },
-            "full_production_example": [
-                "1. POST /voice/design {text: 'Hello, I am Alice.', instruct: 'Cheerful young woman'} → alice_voice",
-                "2. POST /voice/synthesize {ref_audio: alice_voice, ref_text: 'Hello...', text: 'Chapter 1...'} → narration",
-                "3. POST /music/generate {description: 'Gentle acoustic guitar', duration: 60} → bg_music",
-                "4. POST /sfx/generate {description: 'Birds chirping', duration: 5} → sfx",
-                "5. POST /stitcher/compose {timeline: {tracks: [bg_music, narration, sfx]}} → final",
-            ],
         },
         "models": {
             "voice_design": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
@@ -735,7 +583,6 @@ async def documentation() -> Dict[str, Any]:
             "/voice": "TTS module - voice design and synthesis",
             "/music": "Music generation module",
             "/sfx": "Sound effects module",
-            "/stitcher": "Audio composition and stitching module",
         },
     }
 

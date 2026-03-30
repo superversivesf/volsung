@@ -351,10 +351,6 @@ async def startup_event():
     logger.info("  GET  /health        - Health check")
     logger.info("  GET  /doc           - API documentation")
     logger.info("  POST /preload       - Load models now")
-    logger.info("  POST /voice_design  - Generate voice from description (legacy)")
-    logger.info("  POST /synthesize    - Clone voice from reference audio (legacy)")
-    logger.info("")
-    logger.info("Module Routers:")
     logger.info("  POST /voice/design     - Generate voice from description")
     logger.info("  POST /voice/synthesize - Synthesize with cloned voice")
     logger.info("  POST /music/generate   - Generate music from description")
@@ -389,31 +385,6 @@ async def documentation() -> Dict[str, Any]:
         "version": "1.0.0",
         "description": "Voice synthesis server for Qwen3-TTS",
         "endpoints": {
-            "POST /voice_design": {
-                "description": "Generate voice sample from natural language description",
-                "input": {
-                    "text": "Sample text to speak (e.g., 'Hello, I am John. Nice to meet you.')",
-                    "language": "Language: English, Chinese, Japanese, Korean, German, French, Russian, Portuguese, Spanish, Italian, or Auto",
-                    "instruct": "Natural language voice description (e.g., 'A warm, elderly man with a Southern accent')",
-                },
-                "output": {"audio": "Base64-encoded WAV audio", "sample_rate": 24000},
-                "example": {
-                    "text": "Hello, I am John. Nice to meet you.",
-                    "language": "English",
-                    "instruct": "A warm, elderly man's voice with a slight Southern accent and gravelly tone",
-                },
-            },
-            "POST /synthesize": {
-                "description": "Synthesize text using cloned voice from reference audio",
-                "input": {
-                    "ref_audio": "Base64-encoded WAV (from /voice_design output)",
-                    "ref_text": "Transcript of the reference audio",
-                    "text": "New text to synthesize in the cloned voice",
-                    "language": "Language code (default: English)",
-                },
-                "output": {"audio": "Base64-encoded WAV audio", "sample_rate": 24000},
-                "workflow": "1. Call /voice_design to get audio sample\n2. Store the audio and the text you sent\n3. Call /synthesize with that audio + transcript + new text",
-            },
             "GET /health": {
                 "description": "Check server status and model load state",
                 "output": {
@@ -507,31 +478,29 @@ async def documentation() -> Dict[str, Any]:
                 },
             },
             "POST /voice/design": {
-                "description": "Generate voice sample from description (new router)",
+                "description": "Generate voice sample from natural language description",
                 "input": {
-                    "text": "Sample text to speak",
-                    "language": "Language (default: English)",
-                    "instruct": "Natural language voice description",
+                    "text": "Sample text to speak (e.g., 'Hello, I am John. Nice to meet you.')",
+                    "language": "Language: English, Chinese, Japanese, Korean, German, French, Russian, Portuguese, Spanish, Italian, or Auto",
+                    "instruct": "Natural language voice description (e.g., 'A warm, elderly man with a Southern accent')",
                 },
-                "output": {
-                    "audio": "Base64-encoded WAV audio",
-                    "sample_rate": 24000,
+                "output": {"audio": "Base64-encoded WAV audio", "sample_rate": 24000},
+                "example": {
+                    "text": "Hello, I am John. Nice to meet you.",
+                    "language": "English",
+                    "instruct": "A warm, elderly man's voice with a slight Southern accent and gravelly tone",
                 },
-                "note": "Same as POST /voice_design but under /voice/design path",
             },
             "POST /voice/synthesize": {
-                "description": "Synthesize text with cloned voice (new router)",
+                "description": "Synthesize text using cloned voice from reference audio",
                 "input": {
-                    "ref_audio": "Base64-encoded reference audio",
-                    "ref_text": "Transcript of reference audio",
-                    "text": "Text to synthesize",
-                    "language": "Language (default: English)",
+                    "ref_audio": "Base64-encoded WAV (from /voice/design output)",
+                    "ref_text": "Transcript of the reference audio",
+                    "text": "New text to synthesize in the cloned voice",
+                    "language": "Language code (default: English)",
                 },
-                "output": {
-                    "audio": "Base64-encoded synthesized audio",
-                    "sample_rate": 24000,
-                },
-                "note": "Same as POST /synthesize but under /voice/synthesize path",
+                "output": {"audio": "Base64-encoded WAV audio", "sample_rate": 24000},
+                "workflow": "1. Call /voice/design to get audio sample\n2. Store the audio and the text you sent\n3. Call /voice/synthesize with that audio + transcript + new text",
             },
             "GET /music/info": {
                 "description": "Get music module information and status",
@@ -599,103 +568,6 @@ async def preload():
         raise HTTPException(
             status_code=500, detail=f"Failed to preload models: {str(e)}"
         )
-
-
-@app.post("/voice_design", response_model=VoiceDesignResponse)
-async def voice_design(req: VoiceDesignRequest):
-    """
-    Generate voice sample from text description.
-
-    Uses VoiceDesign model to create audio. The output should be stored
-    (audio + transcript) for later use as reference in synthesis.
-    """
-    # Lazy load models on first request
-    if not models_loaded:
-        load_models()
-
-    update_last_access_time()
-
-    if voice_design_model is None:
-        raise HTTPException(status_code=503, detail="VoiceDesign model not loaded")
-
-    try:
-        logger.info(
-            f"[VOICE_DESIGN] Request: text='{req.text[:50]}...' language='{req.language}' instruct='{req.instruct[:50]}...'"
-        )
-        start_time = time.time()
-
-        wavs, sr = voice_design_model.generate_voice_design(
-            text=req.text, language=req.language, instruct=req.instruct
-        )
-
-        elapsed = time.time() - start_time
-        logger.info(
-            f"[VOICE_DESIGN] Generated audio: duration={len(wavs[0]) / sr:.2f}s sample_rate={sr} elapsed={elapsed:.2f}s"
-        )
-
-        audio_base64 = audio_to_base64(wavs[0], sr)
-        audio_size_kb = len(audio_base64) * 3 // 4 // 1024
-        logger.info(f"[VOICE_DESIGN] Response: audio_size={audio_size_kb}KB")
-
-        return VoiceDesignResponse(audio=audio_base64, sample_rate=sr)
-
-    except Exception as e:
-        logger.error(f"[VOICE_DESIGN] Failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Voice design failed: {str(e)}")
-
-
-@app.post("/synthesize", response_model=SynthesizeResponse)
-async def synthesize(req: SynthesizeRequest):
-    """
-    Synthesize text using cloned voice from reference audio.
-
-    Uses Base model's generate_voice_clone() directly with raw audio.
-    The ref_audio should come from /voice_design output.
-    The ref_text must be the transcript of that audio.
-    """
-    # Lazy load models on first request
-    if not models_loaded:
-        load_models()
-
-    update_last_access_time()
-
-    if base_model is None:
-        raise HTTPException(status_code=503, detail="Base model not loaded")
-
-    try:
-        logger.info(
-            f"[SYNTHESIZE] Request: text='{req.text[:50]}...' language='{req.language}'"
-        )
-        start_time = time.time()
-
-        ref_audio, ref_sr = base64_to_audio(req.ref_audio)
-        ref_duration = len(ref_audio) / ref_sr
-        logger.info(
-            f"[SYNTHESIZE] Reference audio: duration={ref_duration:.2f}s sample_rate={ref_sr}"
-        )
-
-        wavs, sr = base_model.generate_voice_clone(
-            ref_audio=(ref_audio, ref_sr),
-            ref_text=req.ref_text,
-            text=req.text,
-            language=req.language,
-        )
-
-        elapsed = time.time() - start_time
-        output_duration = len(wavs[0]) / sr
-        logger.info(
-            f"[SYNTHESIZE] Generated audio: duration={output_duration:.2f}s sample_rate={sr} elapsed={elapsed:.2f}s"
-        )
-
-        audio_base64 = audio_to_base64(wavs[0], sr)
-        audio_size_kb = len(audio_base64) * 3 // 4 // 1024
-        logger.info(f"[SYNTHESIZE] Response: audio_size={audio_size_kb}KB")
-
-        return SynthesizeResponse(audio=audio_base64, sample_rate=sr)
-
-    except Exception as e:
-        logger.error(f"[SYNTHESIZE] Failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Synthesis failed: {str(e)}")
 
 
 # ============================================================================

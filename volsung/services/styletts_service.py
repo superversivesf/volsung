@@ -92,12 +92,16 @@ class StyleTTSParams(BaseModel):
 
 
 class GenerateRequest(BaseModel):
-    """Request to generate speech from text."""
+    """Request to generate speech from text with voice cloning."""
 
     text: str = Field(
         ...,
         description="Text to synthesize",
         examples=["Hello, I am speaking with StyleTTS2."],
+    )
+    ref_audio: str = Field(
+        ...,
+        description="Base64-encoded reference audio (WAV) for voice cloning. Required - StyleTTS2 only supports voice cloning.",
     )
     language: str = Field(
         default="English",
@@ -517,9 +521,10 @@ async def generate(request: GenerateRequest) -> GenerateResponse:
     """Generate speech using StyleTTS2.
 
     Creates synthesized speech from text using StyleTTS2.
+    If ref_audio is provided, performs voice cloning from the reference audio.
 
     Args:
-        request: Generation parameters
+        request: Generation parameters including optional reference audio for cloning
 
     Returns:
         GenerateResponse with base64-encoded audio
@@ -527,11 +532,38 @@ async def generate(request: GenerateRequest) -> GenerateResponse:
     manager = get_styletts2_manager()
     params = request.styletts_params or StyleTTSParams()
     try:
-        return manager.generate(
-            text=request.text,
-            embedding_scale=params.embedding_scale,
-            alpha=params.alpha,
-            beta=params.beta,
+        if request.ref_audio:
+            # Voice cloning mode
+            result = manager.generate_with_reference(
+                text=request.text,
+                ref_audio_b64=request.ref_audio,
+                embedding_scale=params.embedding_scale,
+                alpha=params.alpha,
+                beta=params.beta,
+            )
+        else:
+            # Standard generation
+            result = manager.generate(
+                text=request.text,
+                embedding_scale=params.embedding_scale,
+                alpha=params.alpha,
+                beta=params.beta,
+            )
+
+        # Convert AudioResult to response
+        import base64
+        from io import BytesIO
+
+        buffer = BytesIO()
+        import soundfile as sf
+
+        sf.write(buffer, result.audio, result.sample_rate, format="WAV")
+        buffer.seek(0)
+        audio_b64 = base64.b64encode(buffer.read()).decode()
+
+        return GenerateResponse(
+            audio=audio_b64,
+            sample_rate=result.sample_rate,
         )
     except RuntimeError as e:
         raise HTTPException(

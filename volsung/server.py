@@ -6,7 +6,7 @@ Volsung - Voice synthesis server for Qwen3-TTS with music, SFX, and composition.
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
-from typing import Dict, Any
+from typing import Dict, Any, List, Literal, Union
 import torch
 import numpy as np
 import soundfile as sf
@@ -107,10 +107,22 @@ class HealthResponse(BaseModel):
     sfx_router: bool
 
 
+class PreloadRequest(BaseModel):
+    """Request for preloading models.
+
+    Accepts either a single model name or a list of models to preload.
+    """
+
+    models: Union[str, List[str]] = "all"
+
+
 class PreloadResponse(BaseModel):
-    """Preload response."""
+    """Preload response with detailed status."""
 
     status: str
+    models: List[str]
+    loaded: List[str]
+    unloaded: List[str]
 
 
 # ============================================================================
@@ -144,8 +156,6 @@ class MusicGenerateResponse(BaseModel):
     audio: str
     sample_rate: int
     metadata: MusicMetadata
-
-
 
 
 def get_device():
@@ -368,8 +378,28 @@ async def documentation() -> Dict[str, Any]:
                 },
             },
             "POST /preload": {
-                "description": "Download and load models (call at startup or before first use)",
-                "output": {"status": "preloaded"},
+                "description": "Preload specific models into GPU memory. Models parameter accepts: ['qwen3', 'styletts2', 'music', 'sfx'] or 'all'",
+                "input": {
+                    "models": "Array of model names or 'all' (default: ['qwen3']). Options: 'qwen3', 'styletts2', 'music', 'sfx'"
+                },
+                "behavior": {
+                    "default": "Unloads existing models, loads requested models",
+                    "smart_loading": "Skips models already in memory (no reload unless needed)",
+                    "gpu_conservation": "Only requested models are loaded to minimize GPU memory usage",
+                },
+                "output": {
+                    "status": "ok",
+                    "loaded": ["List of newly loaded models"],
+                    "unloaded": ["List of models unloaded to make room"],
+                    "already_loaded": ["List of models already in memory"],
+                },
+                "examples": {
+                    "preload_qwen3_only": {"models": ["qwen3"]},
+                    "preload_styletts2": {"models": ["styletts2"]},
+                    "preload_all_models": {"models": "all"},
+                    "preload_multiple_specific": {"models": ["qwen3", "music"]},
+                },
+                "workflow_note": "Preload models before first request to avoid wait time. For example, call POST /preload with {'models': ['qwen3']} at server startup or when you know which models you'll need.",
             },
             "POST /music/generate": {
                 "description": "Generate music from text description (up to 30 seconds)",
@@ -568,12 +598,49 @@ async def documentation() -> Dict[str, Any]:
 
 
 @app.post("/preload", response_model=PreloadResponse)
-async def preload():
-    """Download and cache models."""
+async def preload(req: PreloadRequest):
+    """Download and cache models.
+
+    Args:
+        req: PreloadRequest containing models to preload.
+            Can be a single model name or list of names:
+            - "qwen3": Qwen3-TTS voice models
+            - "styletts2": StyleTTS 2 voice cloning
+            - "music": MusicGen music generation
+            - "sfx": AudioLDM sound effects
+            - "all": All models (default)
+
+    Returns:
+        PreloadResponse with status indicating which models were loaded/unloaded.
+
+    Examples:
+        {"models": ["qwen3"]} - Load only Qwen3-TTS
+        {"models": ["styletts2", "music"]} - Load StyleTTS 2 and MusicGen
+        {"models": "all"} - Load all models
+    """
+    from volsung.models.preload_manager import get_preload_manager
+
     try:
-        load_models()
+        manager = get_preload_manager()
+
+        # Handle single string or list
+        if isinstance(req.models, str):
+            requested = [req.models]
+        else:
+            requested = req.models
+
+        result = manager.preload(requested)
+
         update_last_access_time()
-        return PreloadResponse(status="preloaded")
+        return PreloadResponse(
+            status=result["status"],
+            models=result["models"],
+            loaded=result.get("loaded", []),
+            unloaded=result.get("unloaded", []),
+        )
+    except ValueError as e:
+        logger.error(f"Invalid preload request: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Preload failed: {e}")
         raise HTTPException(

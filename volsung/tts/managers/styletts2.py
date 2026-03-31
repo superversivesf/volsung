@@ -142,6 +142,14 @@ class StyleTTS2Manager(ModelManagerBase):
         self._clear_memory()
         logger.info("StyleTTS 2 model unloaded")
 
+    def load(self) -> None:
+        """Load the StyleTTS 2 model.
+
+        Preloads the model into memory. Safe to call multiple times
+        (idempotent - will not reload if already loaded).
+        """
+        self._ensure_loaded()
+
     def compute_style(self, ref_audio_b64: str) -> torch.Tensor:
         """Extract style vector from reference audio.
 

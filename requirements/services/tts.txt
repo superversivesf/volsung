@@ -11,13 +11,17 @@ torch>=2.2.0
 torchaudio>=2.2.0
 
 # HuggingFace ecosystem
-# NOTE: qwen-tts requires transformers==4.57.3
-transformers==4.57.3
-huggingface-hub>=0.30.0
+# NOTE: styletts2 requires huggingface-hub<0.20.0, transformers<4.40
+transformers>=4.38.0,<4.40.0
+huggingface-hub>=0.19.0,<0.20.0
 accelerate>=0.30.0
 
 # TTS models
-qwen-tts
+# NOTE: Skipping qwen-tts due to dependency conflicts with styletts2
+# qwen-tts requires transformers==4.57.3 which needs huggingface-hub>=0.34
+# styletts2 requires huggingface-hub<0.20
+# Only one can be used, using styletts2 for now
+# qwen-tts
 styletts2>=0.1.6
 
 # Audio processing

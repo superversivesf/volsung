@@ -20,7 +20,7 @@ librosa>=0.10.1
 
 # Data handling
 pydantic>=2.5.0
-numpy>=1.24.0
+numpy<2.0  # torch 2.1.0 requires numpy 1.x
 
 # Optional: for better performance
 # xformers  # Uncomment if CUDA available

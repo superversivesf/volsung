@@ -40,7 +40,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Download MusicGen model during build to make container self-contained
 # This downloads: facebook/musicgen-small
 # Makes container self-contained and first startup is instant
-RUN python -c "import torch; from audiocraft.models import MusicGen; MusicGen.get_pretrained('facebook/musicgen-small')"
+# DISABLED: Models will download at runtime instead (simpler, smaller images)
+# RUN python -c "import torch; from audiocraft.models import MusicGen; MusicGen.get_pretrained('facebook/musicgen-small')"
 
 # Copy the volsung package
 COPY volsung/__init__.py /app/volsung/__init__.py

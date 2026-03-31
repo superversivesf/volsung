@@ -30,7 +30,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Download TTS models during build to make container self-contained
 # This downloads: Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign and Qwen/Qwen3-TTS-12Hz-1.7B-Base
 # Makes container self-contained and first startup is instant
-RUN python -c "from qwen_tts import Qwen3TTSModel; Qwen3TTSModel.from_pretrained('Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign'); Qwen3TTSModel.from_pretrained('Qwen/Qwen3-TTS-12Hz-1.7B-Base')" --no-deps
+# DISABLED: Models will download at runtime instead (simpler, smaller images)
+# RUN python -c "from qwen_tts import Qwen3TTSModel; Qwen3TTSModel.from_pretrained('Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign'); Qwen3TTSModel.from_pretrained('Qwen/Qwen3-TTS-12Hz-1.7B-Base')" --no-deps
 
 # Copy the volsung package
 COPY volsung/__init__.py /app/volsung/__init__.py

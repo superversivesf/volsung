@@ -31,7 +31,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Download AudioLDM model during build to make container self-contained
 # This downloads: cvssp/audioldm-m-full
 # Makes container self-contained and first startup is instant
-RUN python -c "from diffusers import AudioLDMPipeline; AudioLDMPipeline.from_pretrained('cvssp/audioldm-m-full')"
+# DISABLED: Models will download at runtime instead (simpler, smaller images)
+# RUN python -c "from diffusers import AudioLDMPipeline; AudioLDMPipeline.from_pretrained('cvssp/audioldm-m-full')"
 
 # Copy the volsung package
 COPY volsung/__init__.py /app/volsung/__init__.py

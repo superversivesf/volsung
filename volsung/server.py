@@ -4,17 +4,6 @@ FastAPI server for Volsung - Voice synthesis, music, SFX, and audio stitching.
 Volsung - Voice synthesis server for Qwen3-TTS with music, SFX, and composition.
 """
 
-import os
-from pathlib import Path
-
-# Set HF_HOME before importing transformers/huggingface_hub
-# This ensures models are stored in the project's models/ directory
-project_root = Path(__file__).parent.parent
-models_dir = project_root / "models"
-models_dir.mkdir(exist_ok=True)
-os.environ.setdefault("HF_HOME", str(models_dir))
-os.environ.setdefault("HF_CACHE_HOME", str(models_dir))
-
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from typing import Dict, Any, List, Literal, Union
@@ -337,7 +326,6 @@ async def startup_event():
     logger.info("=" * 60)
     logger.info("Volsung - Voice Synthesis Server")
     logger.info("=" * 60)
-    logger.info(f"Model cache: {models_dir}")
     logger.info("Models will load on first request to save GPU memory")
     logger.info("POST /preload to load models manually")
     logger.info("")

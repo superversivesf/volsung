@@ -4,25 +4,6 @@
 
 FastAPI server for Qwen3-TTS with voice design and voice cloning capabilities.
 
-## Model Cache
-
-All downloaded models are stored locally in the `models/` directory:
-
-- **Location**: `models/` at the project root
-- **Total Size**: ~20GB for all models
-- **Easy Cleanup**: `rm -rf models/*`
-- **Docker Ready**: Self-contained, no external cache dependencies
-
-```bash
-# Check model cache size
-du -sh models/
-
-# Clean up downloaded models (keeps directory)
-rm -rf models/*
-```
-
-The HF_HOME environment variable is automatically set to the local models directory on server startup.
-
 ## Features
 
 - **Voice Design**: Generate voice samples from natural language descriptions

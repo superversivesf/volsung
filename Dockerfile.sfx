@@ -44,15 +44,15 @@ ENV PYTHONPATH=/app
 
 # Service configuration
 ENV SFX_SERVICE_HOST=0.0.0.0
-ENV SFX_SERVICE_PORT=8005
+ENV SFX_SERVICE_PORT=8004
 ENV SFX_MODEL_CACHE=/app/models
 
 # Expose port
-EXPOSE 8005
+EXPOSE 8004
 
 # Health check using curl
-HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
-    CMD curl -f http://localhost:8005/health || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=900s --retries=3 \
+    CMD curl -f http://localhost:8004/health || exit 1
 
 # Run the SFX service
-CMD ["python", "-m", "uvicorn", "volsung.services.sfx_service:app", "--host", "0.0.0.0", "--port", "8005"]
+CMD ["python", "-m", "uvicorn", "volsung.services.sfx_service:app", "--host", "0.0.0.0", "--port", "8004"]

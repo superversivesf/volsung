@@ -7,7 +7,7 @@ uvicorn[standard]>=0.24.0
 pydantic>=2.5.0
 
 # PyTorch (pinned for compatibility)
-torch==2.1.0
+torch==2.8.0
 torchaudio==2.1.0
 
 # Diffusers for AudioLDM2 (pinned for torch 2.1.0 compatibility)

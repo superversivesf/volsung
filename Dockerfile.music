@@ -13,11 +13,19 @@ ENV PYTHONFAULTHANDLER=1
 WORKDIR /app
 
 # Install system dependencies
-# - ffmpeg: Audio processing for audiocraft
-# - build-essential: Required for compiling some Python packages
+# - ffmpeg and dev libraries: Required for PyAV which audiocraft depends on
+# - build-essential, pkg-config: Required for compiling Python packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
+    libavformat-dev \
+    libavcodec-dev \
+    libavdevice-dev \
+    libavutil-dev \
+    libavfilter-dev \
+    libswscale-dev \
+    libswresample-dev \
     build-essential \
+    pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 # Install torch first (specific version required by audiocraft)

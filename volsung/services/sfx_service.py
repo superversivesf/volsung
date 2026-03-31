@@ -51,7 +51,7 @@ class SFXServiceConfig(BaseModel):
 
     host: str = Field(default_factory=lambda: os.getenv("SFX_SERVICE_HOST", "0.0.0.0"))
     port: int = Field(
-        default_factory=lambda: int(os.getenv("SFX_SERVICE_PORT", "8005"))
+        default_factory=lambda: int(os.getenv("SFX_SERVICE_PORT", "8004"))
     )
     model_size: str = Field(default="base")
     device: Optional[str] = Field(default_factory=lambda: os.getenv("SFX_DEVICE"))

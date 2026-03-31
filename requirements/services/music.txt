@@ -1,5 +1,6 @@
 # Music Service Dependencies (MusicGen)
 # Standalone service for music generation using MusicGen
+# Note: Uses Python 3.9 (required by audiocraft)
 
 # FastAPI and server
 fastapi>=0.104.0
@@ -9,6 +10,9 @@ pydantic>=2.5.0
 # PyTorch (pinned for audiocraft compatibility)
 torch==2.1.0
 torchaudio==2.1.0
+
+# Pin thinc for Python 3.9 compatibility
+thinc<8.3.10
 
 # Audio generation (audiocraft with MusicGen)
 audiocraft>=1.0.0

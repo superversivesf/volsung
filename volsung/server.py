@@ -478,17 +478,53 @@ async def documentation() -> Dict[str, Any]:
                 },
             },
             "POST /voice/design": {
-                "description": "Generate voice sample from natural language description",
+                "description": "Generate voice sample from natural language description (Qwen3-TTS or StyleTTS 2)",
                 "input": {
                     "text": "Sample text to speak (e.g., 'Hello, I am John. Nice to meet you.')",
                     "language": "Language: English, Chinese, Japanese, Korean, German, French, Russian, Portuguese, Spanish, Italian, or Auto",
                     "instruct": "Natural language voice description (e.g., 'A warm, elderly man with a Southern accent')",
+                    "backend": "Optional: TTS backend to use - 'qwen3' (default) or 'styletts2'",
+                    "styletts_params": "Optional (StyleTTS 2 only): embedding_scale (1.0-10.0, emotion intensity), alpha (0.0-1.0, voice similarity), beta (0.0-1.0, emotion similarity), diffusion_steps (3-20, style diversity)",
                 },
                 "output": {"audio": "Base64-encoded WAV audio", "sample_rate": 24000},
                 "example": {
                     "text": "Hello, I am John. Nice to meet you.",
                     "language": "English",
                     "instruct": "A warm, elderly man's voice with a slight Southern accent and gravelly tone",
+                },
+                "example_styletts": {
+                    "text": "This is an exciting announcement!",
+                    "language": "English",
+                    "instruct": "A passionate speaker with high energy",
+                    "backend": "styletts2",
+                    "styletts_params": {
+                        "embedding_scale": 2.0,
+                        "alpha": 0.3,
+                        "beta": 0.7,
+                        "diffusion_steps": 5,
+                    },
+                },
+                "note": "StyleTTS 2 uses text-driven emotion control - describe emotions in the instruct field and tune with embedding_scale",
+            },
+            "POST /voice/styletts/design": {
+                "description": "Generate voice sample using StyleTTS 2 (dedicated endpoint)",
+                "input": {
+                    "text": "Sample text to speak",
+                    "language": "Language code (English, Chinese, etc.)",
+                    "instruct": "Voice and emotion description",
+                    "styletts_params": "Optional: embedding_scale (1.0-10.0, emotion intensity), alpha (0.0-1.0, voice similarity), beta (0.0-1.0, emotion similarity), diffusion_steps (3-20, style diversity)",
+                },
+                "output": {"audio": "Base64-encoded WAV audio", "sample_rate": 24000},
+                "example": {
+                    "text": "Welcome to the future of speech synthesis!",
+                    "language": "English",
+                    "instruct": "An enthusiastic presenter with dynamic energy",
+                    "styletts_params": {
+                        "embedding_scale": 2.5,
+                        "alpha": 0.3,
+                        "beta": 0.7,
+                        "diffusion_steps": 5,
+                    },
                 },
             },
             "POST /voice/synthesize": {
@@ -524,13 +560,15 @@ async def documentation() -> Dict[str, Any]:
         },
         "workflows": {
             "voice_cloning": {
-                "name": "Voice Cloning",
+                "name": "Voice Cloning (Qwen3-TTS or StyleTTS 2)",
                 "steps": [
-                    "1. POST /voice/design with text and instruct to create a voice sample",
-                    "2. Save the returned audio as reference",
-                    "3. POST /voice/synthesize with ref_audio, ref_text, and new text",
-                    "4. Result: Audio in the cloned voice",
+                    "1. Choose backend: Qwen3-TTS (text-to-voice) or StyleTTS 2 (emotion-rich)",
+                    "2. POST /voice/design with text, instruct, and optional backend/styletts_params",
+                    "3. Save the returned audio as reference",
+                    "4. POST /voice/synthesize with ref_audio, ref_text, and new text",
+                    "5. Result: Audio in the cloned voice",
                 ],
+                "note": "StyleTTS 2 adds emotion control via embedding_scale parameter (1.0-10.0). Describe emotions in the instruct field.",
             },
             "audiobook_production": {
                 "name": "Audiobook Production",
@@ -545,6 +583,7 @@ async def documentation() -> Dict[str, Any]:
         "models": {
             "voice_design": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
             "base_clone": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+            "styletts2": "yl4579/StyleTTS2-LibriTTS",
             "music": "facebook/musicgen-small",
             "sfx": "audiogen-medium",
         },

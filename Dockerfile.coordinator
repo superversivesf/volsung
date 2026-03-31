@@ -23,6 +23,9 @@ COPY requirements.txt /app/requirements.txt
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Note: No ML models needed for coordinator (just a gateway service)
+# Container is already self-contained
+
 # Copy the volsung package
 COPY volsung/__init__.py /app/volsung/__init__.py
 COPY volsung/services/__init__.py /app/volsung/services/__init__.py

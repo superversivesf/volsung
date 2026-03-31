@@ -22,6 +22,13 @@ from qwen_tts import Qwen3TTSModel
 from volsung.tts.endpoints import router as tts_router
 from volsung.music.endpoints import router as music_router
 from volsung.sfx.endpoints import router as sfx_router
+from volsung.sfx.schemas import (
+    SFXGenerateRequest,
+    SFXGenerateResponse,
+    SFXLayerRequest,
+    SFXLayerResponse,
+    SFXMetadata,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -139,41 +146,6 @@ class MusicGenerateResponse(BaseModel):
     metadata: MusicMetadata
 
 
-# ============================================================================
-# SFX Generation Models
-# ============================================================================
-
-
-class SFXGenerateRequest(BaseModel):
-    """Request for generating sound effects from text description."""
-
-    description: str
-    duration: float = 5.0
-    category: str | None = None  # e.g., "nature", "mechanical", "urban", "fantasy"
-
-
-class SFXLayerRequest(BaseModel):
-    """Request for generating layered/combined sound effects."""
-
-    layers: list[SFXGenerateRequest]
-
-
-class SFXMetadata(BaseModel):
-    """Metadata for generated sound effects."""
-
-    duration: float
-    sample_rate: int
-    category: str | None
-    generation_time_ms: float
-    model_used: str
-
-
-class SFXGenerateResponse(BaseModel):
-    """Response containing generated sound effect and metadata."""
-
-    audio: str
-    sample_rate: int
-    metadata: SFXMetadata
 
 
 def get_device():

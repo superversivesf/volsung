@@ -14,6 +14,25 @@ FastAPI server for Qwen3-TTS with voice design and voice cloning capabilities.
 - Python 3.10+
 - NVIDIA GPU with CUDA (recommended) or CPU
 - ~8GB VRAM for 1.7B models
+- **espeak-ng** (system package required for StyleTTS 2 phonemization)
+
+### System Dependencies
+
+StyleTTS 2 requires the `espeak-ng` system package for phonemization:
+
+```bash
+# Ubuntu/Debian
+sudo apt-get install espeak-ng
+
+# macOS
+brew install espeak
+
+# Fedora/RHEL
+sudo dnf install espeak-ng
+
+# Windows
+# Download from https://github.com/espeak-ng/espeak-ng/releases
+```
 
 ## Quick Start
 
@@ -29,8 +48,15 @@ source venv/bin/activate  # Linux/Mac
 ### 2. Install Dependencies
 
 ```bash
+# Basic installation (Qwen-TTS only)
 pip install -r requirements.txt
+
+# Or install with StyleTTS 2 support
+pip install -r requirements.txt
+pip install -e ".[styletts]"
 ```
+
+**Note**: StyleTTS 2 requires `espeak-ng` to be installed on your system first. See [System Dependencies](#system-dependencies) above.
 
 ### 3. Run Server
 

@@ -3,7 +3,61 @@
 Provides data validation and serialization for voice design and synthesis endpoints.
 """
 
+from typing import Literal, Optional
+
 from pydantic import BaseModel, Field
+
+
+# =============================================================================
+# StyleTTS 2 Parameters Schema
+# =============================================================================
+
+
+class StyleTTSParams(BaseModel):
+    """Parameters for StyleTTS 2 voice generation.
+
+    Controls the style, emotion, and quality of generated speech
+    when using the StyleTTS 2 backend.
+
+    Example:
+        ```python
+        params = StyleTTSParams(
+            embedding_scale=1.5,
+            alpha=0.3,
+            beta=0.7,
+            diffusion_steps=10,
+        )
+        ```
+    """
+
+    embedding_scale: float = Field(
+        default=1.0,
+        ge=1.0,
+        le=10.0,
+        description="Scale for speaker embedding, controls emotion intensity (1.0-10.0). Higher values = more emotional/expressive speech",
+        examples=[1.0],
+    )
+    alpha: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description="Alpha parameter for diffusion sampling (0.0-1.0)",
+        examples=[0.3],
+    )
+    beta: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description="Beta parameter for diffusion sampling (0.0-1.0)",
+        examples=[0.7],
+    )
+    diffusion_steps: int = Field(
+        default=10,
+        ge=3,
+        le=20,
+        description="Number of diffusion steps for inference (3-20). More steps = higher quality but slower",
+        examples=[10],
+    )
 
 
 # =============================================================================
@@ -42,6 +96,15 @@ class VoiceDesignRequest(BaseModel):
         ...,
         description="Natural language voice description (e.g., 'A warm, elderly man with a Southern accent')",
         examples=["A warm, elderly man's voice with a slight Southern accent"],
+    )
+    backend: Literal["qwen3", "styletts2"] = Field(
+        default="qwen3",
+        description="TTS backend to use: 'qwen3' for Qwen3-TTS, 'styletts2' for StyleTTS 2",
+        examples=["qwen3"],
+    )
+    styletts_params: Optional[StyleTTSParams] = Field(
+        default=None,
+        description="StyleTTS 2-specific parameters. Only used when backend='styletts2'",
     )
 
 

@@ -10,8 +10,8 @@ pydantic>=2.5.0
 torch==2.1.0
 torchaudio==2.1.0
 
-# Diffusers for AudioLDM2
-diffusers>=0.24.0
+# Diffusers for AudioLDM2 (pinned for torch 2.1.0 compatibility)
+diffusers==0.24.0
 transformers>=4.35.0
 accelerate>=0.25.0
 

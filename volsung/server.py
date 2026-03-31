@@ -800,6 +800,50 @@ async def admin_unload():
     )
 
 
+@app.post("/admin/unload-all")
+async def admin_unload_all():
+    """Force unload all services.
+
+    This frees up GPU memory by unloading models from all services.
+    Useful for complete resource cleanup.
+
+    Returns:
+        Dictionary with unload results for all services
+    """
+    registry = get_registry()
+    results = {}
+    any_failed = False
+
+    for service_name in ServiceName:
+        try:
+            client = registry.get_client(service_name)
+            response = await client.forward(
+                "/unload",
+                method="POST",
+                skip_retry=True,
+            )
+            results[service_name.value] = {
+                "status": "unloaded" if response.status_code == 200 else "failed",
+                "http_code": response.status_code,
+            }
+            if response.status_code != 200:
+                any_failed = True
+        except Exception as e:
+            results[service_name.value] = {
+                "status": "failed",
+                "error": str(e),
+            }
+            any_failed = True
+
+    # Also clear the currently_loaded tracking
+    registry._currently_loaded = None
+
+    return {
+        "status": "partial_failure" if any_failed else "success",
+        "results": results,
+    }
+
+
 @app.get("/admin/status", response_model=AdminStatusResponse)
 async def admin_status():
     """Get current loading status.

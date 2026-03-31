@@ -321,6 +321,30 @@ async def sfx_layer(request: SFXLayerRequest) -> SFXLayerResponse:
         )
 
 
+@router.post("/unload")
+async def sfx_unload() -> dict:
+    """Force unload the SFX model.
+
+    Frees GPU memory by unloading the AudioLDM model immediately.
+    Model will be reloaded on next generation request.
+
+    Returns:
+        Dictionary with unload status
+    """
+    global _sfx_manager
+
+    if _sfx_manager is None:
+        return {"unloaded": False, "reason": "manager not initialized"}
+
+    was_loaded = _sfx_manager.is_loaded
+    _sfx_manager.force_unload()
+
+    return {
+        "unloaded": was_loaded,
+        "status": "unloaded" if was_loaded else "already_unloaded",
+    }
+
+
 @router.get(
     "/health",
     response_model=SFXHealthResponse,

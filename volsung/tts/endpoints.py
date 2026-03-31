@@ -453,6 +453,37 @@ async def synthesize(request: SynthesizeRequest) -> SynthesizeResponse:
 # =============================================================================
 
 
+@router.post("/unload")
+async def voice_unload() -> dict:
+    """Force unload all voice models.
+
+    Frees GPU memory by unloading VoiceDesign and Base models.
+    Models will be reloaded on next request.
+
+    Returns:
+        Dictionary with unload status
+    """
+    global _qwen3_manager, _styletts2_manager
+
+    results = {}
+
+    if _qwen3_manager is not None:
+        was_loaded = _qwen3_manager.is_loaded
+        _qwen3_manager.force_unload()
+        results["qwen3"] = {"unloaded": was_loaded}
+    else:
+        results["qwen3"] = {"unloaded": False, "reason": "not_initialized"}
+
+    if _styletts2_manager is not None:
+        was_loaded = _styletts2_manager.is_loaded
+        _styletts2_manager.force_unload()
+        results["styletts2"] = {"unloaded": was_loaded}
+    else:
+        results["styletts2"] = {"unloaded": False, "reason": "not_initialized"}
+
+    return {"unloaded": True, "results": results}
+
+
 @router.get(
     "/health",
     summary="Check TTS health status",

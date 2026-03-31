@@ -1,16 +1,30 @@
+# TTS Service Requirements
+# Installed in Dockerfile.tts
+
+# FastAPI framework
 fastapi>=0.100.0
 uvicorn[standard]>=0.23.0
+
+# HTTP client for service communication
 httpx>=0.27.0
+
+# PyTorch (modern version - 2.2+)
 torch>=2.2.0
 torchaudio>=2.2.0
-transformers>=4.52.0
+
+# HuggingFace ecosystem
+# Pin huggingface-hub to version compatible with styletts2
+huggingface-hub>=0.19.0,<0.20.0
+transformers>=4.38.0,<4.40.0
+accelerate>=0.30.0
+
+# TTS models
 qwen-tts
+styletts2>=0.1.6
+
+# Audio processing
 soundfile>=0.12.0
+
+# Data validation
 pydantic>=2.0.0
 numpy>=1.24.0
-accelerate>=0.30.0
-styletts2>=0.1.6
-# Note: audiocraft requires torch==2.1.0 which is no longer available
-# Install separately if needed: pip install audiocraft --no-deps
-#diffusers>=0.29.0
-#audiocraft>=1.3.0

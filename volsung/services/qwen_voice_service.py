@@ -23,6 +23,7 @@ Environment Variables:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import os
@@ -62,6 +63,32 @@ class QwenVoiceConfig(BaseModel):
         default_factory=lambda: os.getenv("QWEN_VOICE_DEVICE")
     )
     dtype: Optional[str] = Field(default_factory=lambda: os.getenv("QWEN_VOICE_DTYPE"))
+
+
+# =============================================================================
+# Weight Download Functions
+# =============================================================================
+
+
+def is_weights_cached():
+    """Check if model weights exist in HF cache without loading."""
+    cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
+    model_path = os.path.join(
+        cache_dir, "models--Qwen--Qwen3-TTS-12Hz-1.7B-VoiceDesign"
+    )
+    return os.path.exists(model_path)
+
+
+def download_weights():
+    """Download weights to cache without loading to VRAM."""
+    from huggingface_hub import snapshot_download
+
+    snapshot_download(
+        repo_id="Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+        repo_type="model",
+        local_files_only=False,
+        resume_download=True,
+    )
 
 
 # =============================================================================
@@ -295,7 +322,15 @@ def get_voice_manager() -> QwenVoiceManager:
 async def lifespan(app: FastAPI):
     """Manage application lifespan."""
     logger.info("Qwen VoiceDesign Service starting up...")
+
+    # Download weights on startup if not cached
+    if not is_weights_cached():
+        logger.info("Downloading Qwen VoiceDesign weights...")
+        await asyncio.to_thread(download_weights)
+        logger.info("Download complete!")
+
     yield
+
     # Cleanup on shutdown
     logger.info("Qwen VoiceDesign Service shutting down...")
     global _voice_manager
@@ -323,6 +358,7 @@ async def health_check() -> dict:
     Returns:
         Dictionary with status and model availability
     """
+    cached = is_weights_cached()
     model_status = {
         "available": True,
         "loaded": False,
@@ -341,10 +377,13 @@ async def health_check() -> dict:
     except ImportError:
         model_status["available"] = False
 
-    overall_status = "healthy" if model_status["available"] else "unavailable"
+    overall_status = "healthy" if cached else "downloading"
 
     return {
         "status": overall_status,
+        "service": "qwen-voice",
+        "models_cached": cached,
+        "models_loaded": model_status["loaded"],
         "model": model_status,
     }
 

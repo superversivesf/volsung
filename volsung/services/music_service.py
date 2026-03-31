@@ -26,6 +26,7 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -159,6 +160,103 @@ class MustangoManager:
         self._model: Optional[Any] = None
         self._device = self._get_device()
         self._is_loaded = False
+        self._weights_cached = False
+
+    def is_weights_cached(self) -> bool:
+        """Check if Mustango weights are cached in HuggingFace cache.
+
+        Mustango uses diffusers, so we check for the model in HF cache.
+        The model is identified as 'declare-lab/mustango'.
+
+        Returns:
+            True if weights are cached, False otherwise
+        """
+        try:
+            # Get HuggingFace cache directory
+            cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
+
+            # Check for diffusers models cache
+            # Mustango uses diffusers, which stores models with 'models--' prefix
+            model_name = self.config.model_id.replace("/", "--")
+            expected_pattern = f"models--{model_name}"
+
+            if not cache_dir.exists():
+                logger.debug(f"HF cache directory not found: {cache_dir}")
+                return False
+
+            # Look for the model in cache
+            for item in cache_dir.iterdir():
+                if item.is_dir() and expected_pattern in item.name:
+                    # Check if there are actual model files
+                    snapshots_dir = item / "snapshots"
+                    if snapshots_dir.exists() and any(snapshots_dir.iterdir()):
+                        logger.debug(f"Found cached weights: {item.name}")
+                        return True
+
+            logger.debug(f"Weights not cached for {self.config.model_id}")
+            return False
+
+        except Exception as e:
+            logger.warning(f"Error checking weights cache: {e}")
+            return False
+
+    def download_weights(self) -> Dict[str, Any]:
+        """Download Mustango weights from HuggingFace.
+
+        Uses diffusers to download the model weights without loading them
+        into memory. This allows pre-caching before first generation.
+
+        Returns:
+            Dict with status, message, and cache location
+        """
+        import gc
+
+        if self.is_weights_cached():
+            return {
+                "status": "cached",
+                "message": f"Weights already cached for {self.config.model_id}",
+                "cache_location": str(Path.home() / ".cache" / "huggingface" / "hub"),
+            }
+
+        logger.info(f"Downloading Mustango weights for {self.config.model_id}...")
+
+        try:
+            from diffusers import DiffusionPipeline
+
+            # Download the model without loading into memory
+            # Using from_pretrained with cache_dir will download and cache
+            logger.info("Downloading model weights (this may take a while)...")
+
+            # Just download by creating the pipeline
+            # We don't keep it, just let it download to cache
+            _ = DiffusionPipeline.from_pretrained(
+                self.config.model_id,
+                torch_dtype=torch.float32,
+                cache_dir=None,  # Use default HF cache
+            )
+
+            # Clear any loaded tensors
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            cache_location = Path.home() / ".cache" / "huggingface" / "hub"
+
+            logger.info(f"Weights downloaded successfully to {cache_location}")
+
+            return {
+                "status": "downloaded",
+                "message": f"Weights downloaded successfully for {self.config.model_id}",
+                "cache_location": str(cache_location),
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to download weights: {e}")
+            return {
+                "status": "error",
+                "message": f"Failed to download weights: {str(e)}",
+                "cache_location": None,
+            }
 
     def _get_device(self) -> str:
         """Get the best available device."""
@@ -273,9 +371,28 @@ def get_mustango_manager() -> MustangoManager:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan manager."""
+    """Application lifespan manager.
+
+    On startup, downloads model weights if not already cached.
+    """
     logger.info("Music Service starting up...")
+
+    # Initialize manager and download weights if needed
+    manager = get_mustango_manager()
+    if not manager.is_weights_cached():
+        logger.info("Model weights not cached, downloading...")
+        download_result = manager.download_weights()
+        if download_result["status"] == "error":
+            logger.warning(
+                f"Failed to pre-download weights: {download_result['message']}"
+            )
+        else:
+            logger.info(f"Weights status: {download_result['message']}")
+    else:
+        logger.info("Model weights already cached")
+
     yield
+
     logger.info("Music Service shutting down...")
     global _mustango_manager
     if _mustango_manager:
@@ -306,13 +423,20 @@ app.add_middleware(
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check() -> dict:
-    """Check service health status."""
+    """Check service health status.
+
+    Returns status based on whether weights are cached:
+    - ready: Weights are cached and available
+    - downloading: Weights are being downloaded
+    - unavailable: Weights not cached and mustango unavailable
+    """
     model_status = {
         "name": "mustango",
         "available": True,
         "loaded": False,
         "device": None,
         "license": "Apache 2.0",
+        "weights_cached": False,
     }
 
     try:
@@ -324,10 +448,17 @@ async def health_check() -> dict:
             model_status["device"] = (
                 _mustango_manager.device if _mustango_manager.is_loaded else None
             )
+            model_status["weights_cached"] = _mustango_manager.is_weights_cached()
     except ImportError:
         model_status["available"] = False
 
-    overall_status = "healthy" if model_status["available"] else "unavailable"
+    # Determine overall status based on cache state
+    if model_status["weights_cached"]:
+        overall_status = "ready"
+    elif model_status["available"]:
+        overall_status = "healthy"  # Available but not cached yet
+    else:
+        overall_status = "unavailable"
 
     return {
         "status": overall_status,

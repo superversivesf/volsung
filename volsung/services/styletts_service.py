@@ -28,12 +28,14 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from io import BytesIO
+from pathlib import Path
 from typing import Literal, Optional
 
 import numpy as np
 import soundfile as sf
 import torch
 from fastapi import FastAPI, HTTPException, status
+from huggingface_hub import snapshot_download
 from pydantic import BaseModel, Field
 
 # Configure logging
@@ -146,6 +148,70 @@ class HealthResponse(BaseModel):
 
     status: str = Field(..., description="Overall service status")
     model: dict = Field(default_factory=dict, description="Model status")
+    weights: dict = Field(default_factory=dict, description="Weights cache status")
+
+
+# =============================================================================
+# Model Cache Utilities
+# =============================================================================
+
+STYLETTS2_MODEL_ID = "yl4579/StyleTTS2-LibriTTS"
+
+
+def _get_cache_dir() -> Path:
+    """Get the HuggingFace cache directory for StyleTTS2."""
+    default_cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
+    cache_dir = os.getenv("HF_HOME", os.getenv("XDG_CACHE_HOME", default_cache_dir))
+    return Path(cache_dir)
+
+
+def is_weights_cached() -> bool:
+    """Check if StyleTTS2 model weights are cached locally.
+
+    Returns:
+        True if the model snapshot exists in cache, False otherwise.
+    """
+    cache_dir = _get_cache_dir()
+    # Check for model snapshot directory
+    model_path = cache_dir / f"models--{STYLETTS2_MODEL_ID.replace('/', '--')}"
+    snapshots_dir = model_path / "snapshots"
+
+    if not snapshots_dir.exists():
+        return False
+
+    # Check if any snapshot has the required model files
+    for snapshot in snapshots_dir.iterdir():
+        if snapshot.is_dir():
+            # Look for key model files (checkpoints or config)
+            required_files = ["config.yml", "models_", "Models"]
+            for required in required_files:
+                if any(required.lower() in f.name.lower() for f in snapshot.iterdir()):
+                    return True
+
+    return False
+
+
+def download_weights() -> str:
+    """Download StyleTTS2 model weights from HuggingFace.
+
+    Returns:
+        Path to the cached model directory.
+
+    Raises:
+        Exception: If download fails.
+    """
+    logger.info(f"Downloading StyleTTS2 weights from {STYLETTS2_MODEL_ID}...")
+
+    try:
+        cache_path = snapshot_download(
+            repo_id=STYLETTS2_MODEL_ID,
+            repo_type="model",
+        )
+        logger.info(f"StyleTTS2 weights downloaded to: {cache_path}")
+        return cache_path
+    except Exception as e:
+        logger.error(f"Failed to download StyleTTS2 weights: {e}")
+        raise
 
 
 # =============================================================================
@@ -326,7 +392,20 @@ def get_styletts2_manager() -> StyleTTS2Manager:
 async def lifespan(app: FastAPI):
     """Manage application lifespan."""
     logger.info("StyleTTS2 Service starting up...")
+
+    # Check and download weights on startup
+    if not is_weights_cached():
+        logger.info("StyleTTS2 weights not cached, downloading...")
+        try:
+            download_weights()
+            logger.info("StyleTTS2 weights downloaded successfully")
+        except Exception as e:
+            logger.error(f"Failed to download StyleTTS2 weights on startup: {e}")
+    else:
+        logger.info("StyleTTS2 weights already cached")
+
     yield
+
     # Cleanup on shutdown
     logger.info("StyleTTS2 Service shutting down...")
     global _styletts2_manager
@@ -352,7 +431,7 @@ async def health_check() -> dict:
     """Check service health status.
 
     Returns:
-        Dictionary with status and model availability
+        Dictionary with status, model availability, and weights cache status
     """
     model_status = {
         "available": True,
@@ -372,11 +451,20 @@ async def health_check() -> dict:
     except ImportError:
         model_status["available"] = False
 
-    overall_status = "healthy" if model_status["available"] else "unavailable"
+    # Check weights cache status
+    weights_cached = is_weights_cached()
+    weights_status = {
+        "cached": weights_cached,
+        "model_id": STYLETTS2_MODEL_ID,
+    }
+
+    # Health is based on cache status (not VRAM loading)
+    overall_status = "healthy" if weights_cached else "weights_not_cached"
 
     return {
         "status": overall_status,
         "model": model_status,
+        "weights": weights_status,
     }
 
 

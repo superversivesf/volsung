@@ -24,12 +24,14 @@ import os
 import time
 from contextlib import asynccontextmanager
 from io import BytesIO
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import soundfile as sf
 import torch
 from fastapi import FastAPI, HTTPException, status
+from huggingface_hub import snapshot_download
 from pydantic import BaseModel, Field
 
 # Configure logging
@@ -241,6 +243,61 @@ class AudioLDMManager:
 
         return {"status": "unloaded", "message": "Model unloaded successfully"}
 
+    def is_weights_cached(self) -> bool:
+        """Check if AudioLDM model weights are cached locally.
+
+        Uses HuggingFace hub to check if model files exist in the cache.
+        Returns:
+            True if model weights are cached, False otherwise
+        """
+        try:
+            from huggingface_hub import scan_cache_dir
+
+            # Scan cache for this specific model
+            cache_info = scan_cache_dir()
+            for repo in cache_info.repos:
+                if repo.repo_id == self._model_id:
+                    # Check if the cache entry has files
+                    if len(repo.revisions) > 0:
+                        return True
+            return False
+        except Exception as e:
+            logger.warning(f"Could not check cache status: {e}")
+            return False
+
+    def download_weights(self) -> dict:
+        """Download AudioLDM model weights from HuggingFace.
+
+        Downloads the model using huggingface_hub snapshot_download.
+        Returns:
+            Dict with status and message
+        """
+        try:
+            logger.info(f"Downloading AudioLDM model: {self._model_id}...")
+            start_time = time.time()
+
+            # Download the model using huggingface_hub
+            cache_path = snapshot_download(
+                repo_id=self._model_id,
+                repo_type="model",
+            )
+
+            elapsed = time.time() - start_time
+            logger.info(
+                f"AudioLDM model downloaded successfully to {cache_path} "
+                f"({elapsed:.1f}s)"
+            )
+
+            return {
+                "status": "downloaded",
+                "cache_path": cache_path,
+                "elapsed_seconds": elapsed,
+                "message": f"Model downloaded successfully ({elapsed:.1f}s)",
+            }
+        except Exception as e:
+            logger.error(f"Failed to download model weights: {e}")
+            raise RuntimeError(f"Failed to download model weights: {str(e)}")
+
     @property
     def is_loaded(self) -> bool:
         return self._is_loaded
@@ -320,6 +377,18 @@ def get_sfx_manager() -> AudioLDMManager:
 
 
 # =============================================================================
+# Model Download and Loading State
+# =============================================================================
+
+_model_cache_status = {
+    "cached": False,
+    "download_in_progress": False,
+    "download_complete": False,
+    "download_error": None,
+    "cache_path": None,
+}
+
+# =============================================================================
 # FastAPI Application
 # =============================================================================
 
@@ -327,8 +396,40 @@ def get_sfx_manager() -> AudioLDMManager:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager."""
+    global _model_cache_status
+
     logger.info("SFX Service starting up...")
+
+    # Initialize manager and check/download model weights
+    manager = get_sfx_manager()
+
+    try:
+        # Check if weights are cached
+        _model_cache_status["cached"] = manager.is_weights_cached()
+
+        if not _model_cache_status["cached"]:
+            logger.info("AudioLDM model not cached. Downloading...")
+            _model_cache_status["download_in_progress"] = True
+
+            try:
+                result = manager.download_weights()
+                _model_cache_status["download_complete"] = True
+                _model_cache_status["cache_path"] = result.get("cache_path")
+                _model_cache_status["cached"] = True
+                logger.info(result["message"])
+            except Exception as e:
+                _model_cache_status["download_error"] = str(e)
+                logger.error(f"Model download failed: {e}")
+        else:
+            logger.info("AudioLDM model already cached. Skipping download.")
+            _model_cache_status["cached"] = True
+            _model_cache_status["download_complete"] = True
+
+    except Exception as e:
+        logger.error(f"Error during startup weight check: {e}")
+
     yield
+
     logger.info("SFX Service shutting down...")
     global _sfx_manager
     if _sfx_manager:
@@ -350,11 +451,16 @@ app = FastAPI(
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check() -> dict:
-    """Check service health status."""
+    """Check service health status including model cache status."""
+    global _model_cache_status
+
     model_status = {
         "available": True,
         "loaded": False,
         "device": None,
+        "cached": _model_cache_status["cached"],
+        "download_complete": _model_cache_status["download_complete"],
+        "download_in_progress": _model_cache_status["download_in_progress"],
     }
 
     try:
@@ -369,7 +475,17 @@ async def health_check() -> dict:
     except ImportError:
         model_status["available"] = False
 
-    overall_status = "healthy" if model_status["available"] else "unavailable"
+    # Determine overall status based on cache and availability
+    if not model_status["available"]:
+        overall_status = "unavailable"
+    elif _model_cache_status["download_error"]:
+        overall_status = "degraded"
+    elif _model_cache_status["download_in_progress"]:
+        overall_status = "downloading"
+    elif _model_cache_status["cached"]:
+        overall_status = "healthy"
+    else:
+        overall_status = "unavailable"
 
     return {
         "status": overall_status,

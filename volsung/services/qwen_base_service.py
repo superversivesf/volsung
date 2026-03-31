@@ -28,12 +28,14 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from io import BytesIO
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import soundfile as sf
 import torch
 from fastapi import FastAPI, HTTPException, status
+from huggingface_hub import snapshot_download, try_to_load_from_cache
 from pydantic import BaseModel, Field
 
 # Configure logging
@@ -145,6 +147,32 @@ class QwenBaseManager:
         self._device = self._get_device()
         self._dtype = self._get_dtype()
         self._is_loaded = False
+
+    def is_weights_cached(self) -> bool:
+        """Check if model weights are already cached locally."""
+        # Try to load a known file from the model to verify cache
+        cached_path = try_to_load_from_cache(
+            repo_id=self.config.model_id,
+            filename="config.json",
+        )
+        return cached_path is not None and cached_path is not False
+
+    def download_weights(self) -> None:
+        """Download model weights if not already cached."""
+        if self.is_weights_cached():
+            logger.info(f"Weights already cached for {self.config.model_id}")
+            return
+
+        logger.info(f"Downloading weights for {self.config.model_id}...")
+        try:
+            cache_path = snapshot_download(
+                repo_id=self.config.model_id,
+                repo_type="model",
+            )
+            logger.info(f"Weights downloaded to {cache_path}")
+        except Exception as e:
+            logger.error(f"Failed to download weights: {e}")
+            raise RuntimeError(f"Failed to download weights: {e}")
 
     def _get_device(self) -> str:
         """Get the best available device."""
@@ -303,6 +331,10 @@ def get_base_manager() -> QwenBaseManager:
 async def lifespan(app: FastAPI):
     """Manage application lifespan."""
     logger.info("Qwen Base Service starting up...")
+    # Download weights on startup if not cached
+    manager = get_base_manager()
+    if not manager.is_weights_cached():
+        manager.download_weights()
     yield
     # Cleanup on shutdown
     logger.info("Qwen Base Service shutting down...")
@@ -331,28 +363,22 @@ async def health_check() -> dict:
     Returns:
         Dictionary with status and model availability
     """
+    manager = get_base_manager()
+    cached = manager.is_weights_cached()
+
+    # Status: healthy if cached, downloading if not
+    overall_status = "healthy" if cached else "downloading"
+
     model_status = {
-        "available": True,
-        "loaded": False,
+        "loaded": False,  # Lazy loading
+        "cached": cached,
         "device": None,
     }
 
-    try:
-        from qwen_tts import Qwen3TTSModel
-
-        model_status["available"] = True
-        if _base_manager is not None:
-            model_status["loaded"] = _base_manager.is_loaded
-            model_status["device"] = (
-                _base_manager.device if _base_manager.is_loaded else None
-            )
-    except ImportError:
-        model_status["available"] = False
-
-    overall_status = "healthy" if model_status["available"] else "unavailable"
-
     return {
         "status": overall_status,
+        "models_cached": cached,
+        "models_loaded": False,
         "model": model_status,
     }
 

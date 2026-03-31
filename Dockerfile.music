@@ -1,8 +1,8 @@
-# Volsung Music Service Dockerfile
-# Standalone music generation service using MusicGen (audiocraft)
-# Note: audiocraft requires Python 3.9 specifically
+# Volsung Music Service Dockerfile (Mustango)
+# Standalone music generation service using Mustango (Apache 2.0)
+# Requires Python 3.10+
 
-FROM python:3.9-slim
+FROM python:3.10-slim
 
 # Prevent Python from writing pyc files and buffering stdout
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -13,30 +13,17 @@ ENV PYTHONFAULTHANDLER=1
 WORKDIR /app
 
 # Install system dependencies
-# - ffmpeg and dev libraries: Required for PyAV which audiocraft depends on
-# - build-essential, pkg-config: Required for compiling Python packages
+# - ffmpeg: Required for audio processing
 # - curl: For health checks
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
-    libavformat-dev \
-    libavcodec-dev \
-    libavdevice-dev \
-    libavutil-dev \
-    libavfilter-dev \
-    libswscale-dev \
-    libswresample-dev \
-    build-essential \
-    pkg-config \
     curl \
     && rm -rf /var/lib/apt/lists/*
-
-# Install torch first (specific version required by audiocraft)
-RUN pip install --no-cache-dir torch==2.1.0 torchaudio==2.1.0
 
 # Copy requirements
 COPY requirements/services/music.txt /app/requirements.txt
 
-# Install remaining Python dependencies
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Create directories for models and outputs
@@ -52,15 +39,15 @@ ENV PYTHONPATH=/app
 
 # Service configuration
 ENV MUSIC_SERVICE_HOST=0.0.0.0
-ENV MUSIC_SERVICE_PORT=8004
+ENV MUSIC_SERVICE_PORT=8005
 ENV MUSIC_MODEL_CACHE=/app/models
 
 # Expose port
-EXPOSE 8004
+EXPOSE 8005
 
 # Health check using curl
-HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
-    CMD curl -f http://localhost:8004/health || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=900s --retries=3 \
+    CMD curl -f http://localhost:8005/health || exit 1
 
 # Run the music service
-CMD ["python", "-m", "uvicorn", "volsung.services.music_service:app", "--host", "0.0.0.0", "--port", "8004"]
+CMD ["python", "-m", "uvicorn", "volsung.services.music_service:app", "--host", "0.0.0.0", "--port", "8005"]

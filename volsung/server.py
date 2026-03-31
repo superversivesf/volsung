@@ -9,8 +9,8 @@ Service Registry:
 - /voice/design → qwen-voice:8001
 - /voice/synthesize → qwen-base:8002
 - /voice/styletts → styletts:8003
-- /music/generate → music:8004
-- /sfx/generate → sfx:8005
+- /sfx/generate → sfx:8004
+- /music/generate → music:8005
 
 Smart Loading:
 - Tracks currently loaded service/model
@@ -38,8 +38,8 @@ Environment Variables:
     QWEN_VOICE_SERVICE_URL: Qwen voice service (default: http://localhost:8001)
     QWEN_BASE_SERVICE_URL: Qwen base service (default: http://localhost:8002)
     STYLETTS_SERVICE_URL: StyleTTS service (default: http://localhost:8003)
-    MUSIC_SERVICE_URL: Music service (default: http://localhost:8004)
-    SFX_SERVICE_URL: SFX service (default: http://localhost:8005)
+    SFX_SERVICE_URL: SFX service (default: http://localhost:8004)
+    MUSIC_SERVICE_URL: Music service (default: http://localhost:8005)
     COORDINATOR_HOST: Coordinator bind address (default: 0.0.0.0)
     COORDINATOR_PORT: Coordinator port (default: 8000)
 """
@@ -73,7 +73,7 @@ logger = logging.getLogger(__name__)
 QWEN_VOICE_SERVICE_URL = os.getenv("QWEN_VOICE_SERVICE_URL", "http://localhost:8001")
 QWEN_BASE_SERVICE_URL = os.getenv("QWEN_BASE_SERVICE_URL", "http://localhost:8002")
 STYLETTS_SERVICE_URL = os.getenv("STYLETTS_SERVICE_URL", "http://localhost:8003")
-MUSIC_SERVICE_URL = os.getenv("MUSIC_SERVICE_URL", "http://localhost:8004")
+MUSIC_SERVICE_URL = os.getenv("MUSIC_SERVICE_URL", "http://localhost:8005")
 SFX_SERVICE_URL = os.getenv("SFX_SERVICE_URL", "http://localhost:8005")
 COORDINATOR_HOST = os.getenv("COORDINATOR_HOST", "0.0.0.0")
 COORDINATOR_PORT = int(os.getenv("COORDINATOR_PORT", "8000"))
@@ -112,8 +112,8 @@ SERVICE_PORTS = {
     ServiceName.QWEN_VOICE: 8001,
     ServiceName.QWEN_BASE: 8002,
     ServiceName.STYLETTS: 8003,
-    ServiceName.MUSIC: 8004,
-    ServiceName.SFX: 8005,
+    ServiceName.MUSIC: 8005,
+    ServiceName.SFX: 8004,
 }
 
 

@@ -7,8 +7,9 @@
 #   - qwen-base: Qwen Base TTS service (port 8002)
 #   - styletts: StyleTTS2 service (port 8003)
 #   - sfx: AudioLDM sound effects service (port 8004)
+#   - music: Mustango music generation service (port 8005)
 #
-# NOTE: MusicGen service removed due to Python 3.9/dependency conflicts
+# NOTE: MusicGen replaced with Mustango (Apache 2.0 licensed, Python 3.10+)
 #
 # Usage:
 #   docker-compose up -d        # Start all services
@@ -134,9 +135,45 @@ services:
               capabilities: [gpu]
 
   # ============================================================================
-  # SFX Service (Sound Effects Generation using AudioLDM)
-  # NOTE: Music service removed due to Python 3.9/dependency conflicts
+  # Music Service (Mustango - Apache 2.0 Licensed)
+  # Note: MusicGen replaced with Mustango for Python 3.10+ compatibility
   # ============================================================================
+  music:
+    build:
+      context: .
+      dockerfile: Dockerfile.music
+    container_name: volsung-music
+    environment:
+      - MUSIC_SERVICE_HOST=0.0.0.0
+      - MUSIC_SERVICE_PORT=8005
+      - MUSIC_IDLE_TIMEOUT=300
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    ports:
+      - "8005:8005"
+    volumes:
+      - music_models:/app/models
+      - music_cache:/root/.cache
+      - music_outputs:/app/outputs
+    networks:
+      - volsung-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 900s  # 15 minutes for initial download
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # ============================================================================
+  # SFX Service (Sound Effects Generation using AudioLDM)
   # ============================================================================
   sfx:
     build:
@@ -186,6 +223,7 @@ services:
       - QWEN_VOICE_SERVICE_URL=http://qwen-voice:8001
       - QWEN_BASE_SERVICE_URL=http://qwen-base:8002
       - STYLETTS_SERVICE_URL=http://styletts:8003
+      - MUSIC_SERVICE_URL=http://music:8005
       - SFX_SERVICE_URL=http://sfx:8004
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
@@ -199,6 +237,8 @@ services:
       qwen-base:
         condition: service_healthy
       styletts:
+        condition: service_healthy
+      music:
         condition: service_healthy
       sfx:
         condition: service_healthy

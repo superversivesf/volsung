@@ -1,28 +1,27 @@
-# Music Service Dependencies (MusicGen)
-# Standalone service for music generation using MusicGen
-# Note: Uses Python 3.9 (required by audiocraft)
+# Music Service Dependencies (Mustango)
+# Standalone service for music generation using Mustango
+# Apache 2.0 Licensed - Commercial use allowed
 
 # FastAPI and server
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 pydantic>=2.5.0
 
-# PyTorch (pinned for audiocraft compatibility)
-torch==2.1.0
-torchaudio==2.1.0
+# PyTorch
+torch>=2.0.0
+torchaudio>=2.0.0
 
-# Pin thinc for Python 3.9 compatibility
-thinc<8.3.10
-
-# Audio generation (audiocraft with MusicGen)
-audiocraft>=1.0.0
+# Mustango - Apache 2.0 licensed music generation
+diffusers>=0.25.0
+transformers>=4.36.0
+accelerate>=0.26.0
 
 # Audio processing
 soundfile>=0.12.1
 librosa>=0.10.0
 
 # Data handling
-numpy<2.0  # torch 2.1.0 requires numpy 1.x
+numpy>=1.24.0
 
 # Optional: For better performance
 # xformers  # Uncomment if using CUDA

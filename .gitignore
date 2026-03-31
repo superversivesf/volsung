@@ -5,7 +5,8 @@ venv/
 .venv/
 *.wav
 *.mp3
-models/
+models/*
+!models/.gitkeep
 !volsung/models/
 *.egg-info/
 dist/

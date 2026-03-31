@@ -18,6 +18,22 @@ import yaml
 from pydantic import BaseModel, Field, field_validator
 
 
+def get_model_cache_dir() -> str:
+    """Get the path to the local model cache directory.
+
+    Returns:
+        Absolute path to the project's models/ directory.
+
+    Example:
+        >>> cache_dir = get_model_cache_dir()
+        >>> print(cache_dir)
+        '/path/to/volsung/models'
+    """
+    # Get the project root (parent of volsung package)
+    project_root = Path(__file__).parent.parent
+    return str(project_root / "models")
+
+
 class TTSConfig(BaseModel):
     """Text-to-Speech configuration."""
 

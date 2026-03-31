@@ -6,8 +6,9 @@
 #   - qwen-voice: Qwen VoiceDesign service (port 8001)
 #   - qwen-base: Qwen Base TTS service (port 8002)
 #   - styletts: StyleTTS2 service (port 8003)
-#   - music: MusicGen service (port 8004)
-#   - sfx: AudioLDM sound effects service (port 8005)
+#   - sfx: AudioLDM sound effects service (port 8004)
+#
+# NOTE: MusicGen service removed due to Python 3.9/dependency conflicts
 #
 # Usage:
 #   docker-compose up -d        # Start all services
@@ -130,44 +131,9 @@ services:
               capabilities: [gpu]
 
   # ============================================================================
-  # Music Service (Music Generation using MusicGen)
-  # ============================================================================
-  music:
-    build:
-      context: .
-      dockerfile: Dockerfile.music
-    container_name: volsung-music
-    environment:
-      - MUSIC_SERVICE_HOST=0.0.0.0
-      - MUSIC_SERVICE_PORT=8004
-      - MUSIC_IDLE_TIMEOUT=300
-      - PYTHONUNBUFFERED=1
-      - PYTHONDONTWRITEBYTECODE=1
-    ports:
-      - "8004:8004"
-    volumes:
-      - music_models:/app/models
-      - music_cache:/root/.cache
-      - music_outputs:/app/outputs
-    networks:
-      - volsung-network
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 120s
-    restart: unless-stopped
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-
-  # ============================================================================
   # SFX Service (Sound Effects Generation using AudioLDM)
+  # NOTE: Music service removed due to Python 3.9/dependency conflicts
+  # ============================================================================
   # ============================================================================
   sfx:
     build:
@@ -176,12 +142,12 @@ services:
     container_name: volsung-sfx
     environment:
       - SFX_SERVICE_HOST=0.0.0.0
-      - SFX_SERVICE_PORT=8005
+      - SFX_SERVICE_PORT=8004
       - SFX_IDLE_TIMEOUT=300
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
     ports:
-      - "8005:8005"
+      - "8004:8004"
     volumes:
       - sfx_models:/app/models
       - sfx_cache:/root/.cache
@@ -217,8 +183,7 @@ services:
       - QWEN_VOICE_SERVICE_URL=http://qwen-voice:8001
       - QWEN_BASE_SERVICE_URL=http://qwen-base:8002
       - STYLETTS_SERVICE_URL=http://styletts:8003
-      - MUSIC_SERVICE_URL=http://music:8004
-      - SFX_SERVICE_URL=http://sfx:8005
+      - SFX_SERVICE_URL=http://sfx:8004
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
     ports:
@@ -231,8 +196,6 @@ services:
       qwen-base:
         condition: service_healthy
       styletts:
-        condition: service_healthy
-      music:
         condition: service_healthy
       sfx:
         condition: service_healthy

@@ -1,0 +1,50 @@
+# Volsung Coordinator Service Dockerfile
+# API Gateway that routes requests to TTS, Music, and SFX services
+
+FROM python:3.10-slim
+
+# Prevent Python from writing pyc files and buffering stdout
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONFAULTHANDLER=1
+
+# Set working directory
+WORKDIR /app
+
+# Install curl for healthchecks
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements for coordinator (lightweight - no ML deps)
+# Using requirements.txt with only coordinator essentials
+COPY requirements.txt /app/requirements.txt
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the volsung package
+COPY volsung/__init__.py /app/volsung/__init__.py
+COPY volsung/services/__init__.py /app/volsung/services/__init__.py
+COPY volsung/services/client.py /app/volsung/services/client.py
+COPY volsung/server.py /app/volsung/server.py
+
+# Set Python path
+ENV PYTHONPATH=/app
+
+# Environment variables for service URLs (configured via docker-compose)
+ENV TTS_SERVICE_URL=http://tts:8001
+ENV MUSIC_SERVICE_URL=http://music:8002
+ENV SFX_SERVICE_URL=http://sfx:8003
+ENV COORDINATOR_HOST=0.0.0.0
+ENV COORDINATOR_PORT=8000
+
+# Expose port
+EXPOSE 8000
+
+# Health check using curl
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Run the coordinator
+CMD ["python", "-m", "uvicorn", "volsung.server:app", "--host", "0.0.0.0", "--port", "8000"]

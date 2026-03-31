@@ -1,0 +1,48 @@
+# Volsung Music Service Dockerfile
+# Standalone music generation service using MusicGen (audiocraft)
+# Note: audiocraft requires Python 3.9 specifically
+
+FROM python:3.9-slim
+
+# Prevent Python from writing pyc files and buffering stdout
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONFAULTHANDLER=1
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+# - ffmpeg: Audio processing for audiocraft
+# - build-essential: Required for compiling some Python packages
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install torch first (specific version required by audiocraft)
+RUN pip install --no-cache-dir torch==2.1.0 torchaudio==2.1.0
+
+# Copy requirements
+COPY requirements/services/music.txt /app/requirements.txt
+
+# Install remaining Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the volsung package
+COPY volsung/__init__.py /app/volsung/__init__.py
+COPY volsung/services/__init__.py /app/volsung/services/__init__.py
+COPY volsung/services/music_service.py /app/volsung/services/music_service.py
+
+# Set Python path
+ENV PYTHONPATH=/app
+
+# Expose port
+EXPOSE 8002
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')" || exit 1
+
+# Run the music service
+CMD ["python", "-m", "uvicorn", "volsung.services.music_service:app", "--host", "0.0.0.0", "--port", "8002"]

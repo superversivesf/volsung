@@ -1,0 +1,47 @@
+# Volsung SFX Service Dockerfile
+# Standalone sound effects generation service using AudioLDM2
+
+FROM python:3.10-slim
+
+# Prevent Python from writing pyc files and buffering stdout
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONFAULTHANDLER=1
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+# - ffmpeg: Audio processing
+# - build-essential: Required for compiling some Python packages
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install torch first (specific version for stability)
+RUN pip install --no-cache-dir torch==2.1.0 torchaudio==2.1.0
+
+# Copy requirements
+COPY requirements/services/sfx.txt /app/requirements.txt
+
+# Install remaining Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the volsung package
+COPY volsung/__init__.py /app/volsung/__init__.py
+COPY volsung/services/__init__.py /app/volsung/services/__init__.py
+COPY volsung/services/sfx_service.py /app/volsung/services/sfx_service.py
+
+# Set Python path
+ENV PYTHONPATH=/app
+
+# Expose port
+EXPOSE 8003
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8003/health')" || exit 1
+
+# Run the SFX service
+CMD ["python", "-m", "uvicorn", "volsung.services.sfx_service:app", "--host", "0.0.0.0", "--port", "8003"]

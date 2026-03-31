@@ -1,0 +1,26 @@
+# SFX Service Dependencies
+# Standalone sound effects generation service using AudioLDM2
+
+# FastAPI and server
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+
+# PyTorch (pinned for compatibility)
+torch==2.1.0
+torchaudio==2.1.0
+
+# Diffusers for AudioLDM2
+diffusers>=0.24.0
+transformers>=4.35.0
+accelerate>=0.25.0
+
+# Audio processing
+soundfile>=0.12.1
+librosa>=0.10.1
+
+# Data handling
+pydantic>=2.5.0
+numpy>=1.24.0
+
+# Optional: for better performance
+# xformers  # Uncomment if CUDA available

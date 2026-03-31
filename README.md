@@ -133,6 +133,115 @@ Check server status and model load state.
 
 Download and cache models before first use.
 
+## Microservices Architecture
+
+Volsung uses a microservices architecture with a lightweight coordinator/gateway that routes requests to specialized services:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      Coordinator                             │
+│                    (Port 8000)                               │
+│  - Routes requests to appropriate services                   │
+│  - Aggregates health status from all services                │
+│  - Returns 503 if service unavailable                        │
+└──────────────┬──────────────────────────────┬───────────────┘
+               │                              │
+      ┌────────▼────────┐          ┌────────▼────────┐
+      │   TTS Service   │          │  Music Service  │
+      │   (Port 8001)   │          │   (Port 8002)   │
+      │                 │          │                 │
+      │ • /voice/design │          │ • /music/generate│
+      │ • /voice/       │          │ • /music/*      │
+      │   synthesize    │          │                 │
+      └────────┬────────┘          └────────┬────────┘
+               │                              │
+      ┌────────▼────────┐                     │
+      │   SFX Service   │                     │
+      │   (Port 8003)   │◄────────────────────┘
+      │                 │
+      │ • /sfx/generate │
+      │ • /sfx/layer    │
+      │ • /sfx/*        │
+      └─────────────────┘
+```
+
+### Services
+
+| Service | Port | Description | Endpoints |
+|---------|------|-------------|-----------|
+| **Coordinator** | 8000 | API Gateway & routing | `/health`, `/doc`, `/preload`, `/voice/*`, `/music/*`, `/sfx/*` |
+| **TTS** | 8001 | Text-to-Speech (Qwen3-TTS, StyleTTS 2) | `/voice/design`, `/voice/synthesize` |
+| **Music** | 8002 | Music generation (MusicGen) | `/music/generate`, `/music/info` |
+| **SFX** | 8003 | Sound effects (AudioLDM2) | `/sfx/generate`, `/sfx/layer` |
+
+### Starting All Services
+
+Use the convenience script to start all services:
+
+```bash
+# Start all services
+./scripts/start-all.sh
+
+# Start in daemon mode (background)
+./scripts/start-all.sh --daemon
+
+# Skip specific services
+SKIP_SERVICES=music ./scripts/start-all.sh
+
+# Custom log directory
+./scripts/start-all.sh --log-dir /var/log/volsung
+```
+
+### Using Docker Compose
+
+```bash
+# Start all services
+docker-compose up -d
+
+# View logs
+docker-compose logs -f coordinator
+docker-compose logs -f tts
+
+# Stop all services
+docker-compose down
+```
+
+### Health Aggregation
+
+Check the health of all services:
+
+```bash
+curl http://localhost:8000/health
+```
+
+Response:
+```json
+{
+  "status": "healthy",
+  "coordinator": "healthy",
+  "services": {
+    "tts": {"healthy": true, "response_time_ms": 12.5},
+    "music": {"healthy": true, "response_time_ms": 8.3},
+    "sfx": {"healthy": true, "response_time_ms": 15.1}
+  },
+  "available": ["tts", "music", "sfx"],
+  "unavailable": []
+}
+```
+
+### Service Unavailability
+
+If a service is unavailable, the coordinator returns HTTP 503:
+
+```json
+{
+  "error": "Service unavailable",
+  "service": "music",
+  "message": "Could not connect to service",
+  "suggestion": "Check that the music service is running"
+}
+```
+
 ## Workflow
 
 1. Use `/voice_design` to create character voice samples

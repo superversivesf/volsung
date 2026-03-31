@@ -1,0 +1,35 @@
+# TTS Service Requirements
+# Standalone dependencies for the TTS service only
+
+# FastAPI and server
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+
+# PyTorch (modern version)
+torch>=2.2.0
+torchaudio>=2.2.0
+
+# Hugging Face
+transformers>=4.40.0
+accelerate>=0.25.0
+
+# TTS packages
+qwen-tts>=0.1.0
+styletts2>=0.1.0
+
+# Audio processing
+soundfile>=0.12.1
+librosa>=0.10.1
+
+# Data validation
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# Utilities
+numpy>=1.24.0
+pyyaml>=6.0.1
+python-multipart>=0.0.6
+
+# NOTE: This is a lightweight TTS-only service.
+# NO audiocraft (MusicGen)
+# NO diffusers (AudioLDM)

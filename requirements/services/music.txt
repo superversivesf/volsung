@@ -1,0 +1,31 @@
+# Music Service Dependencies
+# Standalone service for music generation using MusicGen
+# 
+# Usage:
+#   python -m venv .venv-music
+#   source .venv-music/bin/activate
+#   pip install -r requirements/services/music.txt
+#   ./scripts/start-music.sh
+
+# FastAPI and server
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+
+# PyTorch (exact version for audiocraft compatibility)
+torch==2.1.0
+torchaudio==2.1.0
+
+# Audio generation (audiocraft with MusicGen)
+# Note: This installs audiocraft and its dependencies
+audiocraft>=1.0.0
+
+# Audio processing
+soundfile>=0.12.1
+librosa>=0.10.0
+
+# Data validation and utilities
+pydantic>=2.0.0
+numpy>=1.24.0
+
+# Optional: For better performance
+# xformers  # Uncomment if using CUDA

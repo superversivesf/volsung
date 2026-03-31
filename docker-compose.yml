@@ -1,0 +1,195 @@
+# Volsung Microservices Architecture
+# Docker Compose configuration for running all services
+#
+# Services:
+#   - coordinator: Main API gateway (port 8000)
+#   - tts: Text-to-Speech service (port 8001)
+#   - music: Music generation service (port 8002)
+#   - sfx: Sound effects generation service (port 8003)
+#
+# Usage:
+#   docker-compose up -d        # Start all services
+#   docker-compose logs -f      # Follow logs
+#   docker-compose down          # Stop all services
+#
+# For development with hot reload:
+#   docker-compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+
+version: "3.8"
+
+services:
+  # ============================================================================
+  # TTS Service (Text-to-Speech)
+  # ============================================================================
+  tts:
+    build:
+      context: .
+      dockerfile: Dockerfile.tts
+      args:
+        - PYTHON_VERSION=3.10
+    container_name: volsung-tts
+    environment:
+      - TTS_SERVICE_HOST=0.0.0.0
+      - TTS_SERVICE_PORT=8001
+      - TTS_IDLE_TIMEOUT=300
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    ports:
+      - "8001:8001"
+    volumes:
+      - tts_models:/app/models
+      - tts_cache:/root/.cache
+    networks:
+      - volsung-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # ============================================================================
+  # Music Service (Music Generation)
+  # ============================================================================
+  music:
+    build:
+      context: .
+      dockerfile: Dockerfile.music
+      args:
+        - PYTHON_VERSION=3.9
+    container_name: volsung-music
+    environment:
+      - MUSIC_SERVICE_HOST=0.0.0.0
+      - MUSIC_SERVICE_PORT=8002
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    ports:
+      - "8002:8002"
+    volumes:
+      - music_models:/app/models
+      - music_cache:/root/.cache
+    networks:
+      - volsung-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # ============================================================================
+  # SFX Service (Sound Effects Generation)
+  # ============================================================================
+  sfx:
+    build:
+      context: .
+      dockerfile: Dockerfile.sfx
+      args:
+        - PYTHON_VERSION=3.10
+    container_name: volsung-sfx
+    environment:
+      - SFX_SERVICE_HOST=0.0.0.0
+      - SFX_SERVICE_PORT=8003
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    ports:
+      - "8003:8003"
+    volumes:
+      - sfx_models:/app/models
+      - sfx_cache:/root/.cache
+    networks:
+      - volsung-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # ============================================================================
+  # Coordinator (API Gateway)
+  # ============================================================================
+  coordinator:
+    build:
+      context: .
+      dockerfile: Dockerfile.coordinator
+      args:
+        - PYTHON_VERSION=3.10
+    container_name: volsung-coordinator
+    environment:
+      - COORDINATOR_HOST=0.0.0.0
+      - COORDINATOR_PORT=8000
+      - TTS_SERVICE_URL=http://tts:8001
+      - MUSIC_SERVICE_URL=http://music:8002
+      - SFX_SERVICE_URL=http://sfx:8003
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    ports:
+      - "8000:8000"
+    depends_on:
+      tts:
+        condition: service_healthy
+      music:
+        condition: service_healthy
+      sfx:
+        condition: service_healthy
+    networks:
+      - volsung-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+# ==============================================================================
+# Volumes for persistent data
+# ==============================================================================
+volumes:
+  tts_models:
+    driver: local
+  tts_cache:
+    driver: local
+  music_models:
+    driver: local
+  music_cache:
+    driver: local
+  sfx_models:
+    driver: local
+  sfx_cache:
+    driver: local
+
+# ==============================================================================
+# Network for inter-service communication
+# ==============================================================================
+networks:
+  volsung-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

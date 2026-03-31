@@ -1,35 +1,58 @@
 """
-FastAPI server for Volsung - Voice synthesis, music, SFX, and audio stitching.
+Volsung Coordinator/Gateway - Service routing and health aggregation.
 
-Volsung - Voice synthesis server for Qwen3-TTS with music, SFX, and composition.
+This is the main entry point for the Volsung audio generation system.
+It acts as a lightweight gateway that routes requests to microservices:
+- /voice/* → TTS service (port 8001)
+- /music/* → Music service (port 8002)
+- /sfx/* → SFX service (port 8003)
+
+The coordinator provides:
+- Request routing and forwarding
+- Health aggregation from all services
+- Service discovery and availability checking
+- Helpful error messages when services are unavailable
+
+Example:
+    # Start all services
+    docker-compose up
+
+    # Or manually
+    ./scripts/start-all.sh
+
+    # Then use the coordinator
+    curl http://localhost:8000/health
+    curl -X POST http://localhost:8000/voice/design -d '{"text": "Hello", "instruct": "warm voice"}'
+
+Environment Variables:
+    TTS_SERVICE_URL: TTS service URL (default: http://localhost:8001)
+    MUSIC_SERVICE_URL: Music service URL (default: http://localhost:8002)
+    SFX_SERVICE_URL: SFX service URL (default: http://localhost:8003)
+    COORDINATOR_HOST: Coordinator bind address (default: 0.0.0.0)
+    COORDINATOR_PORT: Coordinator port (default: 8000)
 """
 
-from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, Field
-from typing import Dict, Any, List, Literal, Union
-import torch
-import numpy as np
-import soundfile as sf
-from io import BytesIO
-import base64
+from __future__ import annotations
+
 import logging
-import time
-import threading
+import os
+from contextlib import asynccontextmanager
+from typing import Any, Dict, List, Optional, Set
 
-from qwen_tts import Qwen3TTSModel
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel, Field
 
-# Import module routers
-from volsung.tts.endpoints import router as tts_router
-from volsung.music.endpoints import router as music_router
-from volsung.sfx.endpoints import router as sfx_router
-from volsung.sfx.schemas import (
-    SFXGenerateRequest,
-    SFXGenerateResponse,
-    SFXLayerRequest,
-    SFXLayerResponse,
-    SFXMetadata,
+from volsung.services.client import (
+    ServiceClient,
+    ServiceInfo,
+    ServiceRegistry,
+    discover_services,
+    get_service_registry,
+    close_service_registry,
 )
 
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -37,899 +60,490 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(
-    title="Volsung",
-    description="Voice synthesis, music generation, SFX, and audio composition server",
-    version="1.0.0",
-)
+# ============================================================================
+# Configuration
+# ============================================================================
 
-# Register module routers
-app.include_router(tts_router)
-app.include_router(music_router)
-app.include_router(sfx_router)
+TTS_SERVICE_URL = os.getenv("TTS_SERVICE_URL", "http://localhost:8001")
+MUSIC_SERVICE_URL = os.getenv("MUSIC_SERVICE_URL", "http://localhost:8002")
+SFX_SERVICE_URL = os.getenv("SFX_SERVICE_URL", "http://localhost:8003")
+COORDINATOR_HOST = os.getenv("COORDINATOR_HOST", "0.0.0.0")
+COORDINATOR_PORT = int(os.getenv("COORDINATOR_PORT", "8000"))
 
-voice_design_model = None
-base_model = None
-music_model = None
-sfx_model = None
-models_loaded = False
-
-# Thread-safe idle monitoring globals
-last_access_time = 0.0
-idle_lock = threading.Lock()
-idle_monitor_thread = None
-IDLE_TIMEOUT_SECONDS = 300  # 5 minutes
-IDLE_CHECK_INTERVAL = 60  # Check every 60 seconds
-idle_monitor_running = False
-
-
-class VoiceDesignRequest(BaseModel):
-    """Request for generating a voice sample from a description."""
-
-    text: str
-    language: str = "English"
-    instruct: str
-
-
-class VoiceDesignResponse(BaseModel):
-    """Response containing generated audio for use as reference."""
-
-    audio: str
-    sample_rate: int
-
-
-class SynthesizeRequest(BaseModel):
-    """Request for synthesizing text with a cloned voice."""
-
-    ref_audio: str
-    ref_text: str
-    text: str
-    language: str = "English"
-
-
-class SynthesizeResponse(BaseModel):
-    """Response containing synthesized audio."""
-
-    audio: str
-    sample_rate: int
+# ============================================================================
+# Pydantic Schemas
+# ============================================================================
 
 
 class HealthResponse(BaseModel):
-    """Health check response."""
+    """Health check response with service aggregation."""
 
-    status: str
-    voice_design_model: bool
-    base_model: bool
-    music_model: bool
-    sfx_model: bool
-    tts_router: bool
-    music_router: bool
-    sfx_router: bool
+    status: str = Field(..., description="Overall coordinator status")
+    coordinator: str = Field(default="healthy", description="Coordinator status")
+    services: Dict[str, Any] = Field(
+        default_factory=dict, description="Health status of each service"
+    )
+    available: List[str] = Field(
+        default_factory=list, description="List of available services"
+    )
+    unavailable: List[str] = Field(
+        default_factory=list, description="List of unavailable services"
+    )
 
 
 class PreloadRequest(BaseModel):
-    """Request for preloading models.
+    """Request for preloading models across services."""
 
-    Accepts either a single model name or a list of models to preload.
-    """
-
-    models: Union[str, List[str]] = "all"
+    models: List[str] = Field(
+        default_factory=lambda: ["all"],
+        description="Models to preload: 'tts', 'music', 'sfx', or 'all'",
+    )
 
 
 class PreloadResponse(BaseModel):
-    """Preload response with detailed status."""
+    """Preload response with per-service results."""
 
-    status: str
-    models: List[str]
-    loaded: List[str]
-    unloaded: List[str]
+    status: str = Field(..., description="Overall preload status")
+    results: Dict[str, Any] = Field(
+        default_factory=dict, description="Preload results per service"
+    )
+
+
+class ServiceStatus(BaseModel):
+    """Status of a single service."""
+
+    name: str
+    url: str
+    healthy: bool
+    response_time_ms: Optional[float] = None
+    error: Optional[str] = None
+
+
+class DocumentationResponse(BaseModel):
+    """API documentation response."""
+
+    name: str = Field(default="Volsung Coordinator")
+    version: str = Field(default="2.0.0")
+    description: str = Field(
+        default="Gateway for Volsung audio generation microservices"
+    )
+    architecture: str = Field(default="microservices")
+    services: Dict[str, Any] = Field(default_factory=dict)
+    endpoints: Dict[str, Any] = Field(default_factory=dict)
 
 
 # ============================================================================
-# Music Generation Models
+# Global State
+# ============================================================================
+
+_service_registry: Optional[ServiceRegistry] = None
+
+
+def get_registry() -> ServiceRegistry:
+    """Get or create the service registry."""
+    global _service_registry
+    if _service_registry is None:
+        _service_registry = ServiceRegistry(
+            tts_url=TTS_SERVICE_URL,
+            music_url=MUSIC_SERVICE_URL,
+            sfx_url=SFX_SERVICE_URL,
+        )
+    return _service_registry
+
+
+# ============================================================================
+# FastAPI Application
 # ============================================================================
 
 
-class MusicGenerateRequest(BaseModel):
-    """Request for generating music from text description."""
-
-    description: str
-    duration: float = 30.0
-    genre: str | None = None
-    mood: str | None = None
-    tempo: str | None = None  # slow, medium, fast
-
-
-class MusicMetadata(BaseModel):
-    """Metadata for generated music."""
-
-    duration: float
-    sample_rate: int
-    genre_tags: list[str]
-    generation_time_ms: float
-    model_used: str
-
-
-class MusicGenerateResponse(BaseModel):
-    """Response containing generated music and metadata."""
-
-    audio: str
-    sample_rate: int
-    metadata: MusicMetadata
-
-
-def get_device():
-    """Get the best available device."""
-    if torch.cuda.is_available():
-        return "cuda:0"
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
-
-
-def update_last_access_time():
-    """Update the last access time for idle monitoring (thread-safe)."""
-    global last_access_time
-    with idle_lock:
-        last_access_time = time.time()
-
-
-def unload_models_if_idle():
-    """Unload models if they've been idle for too long."""
-    global voice_design_model, base_model, models_loaded
-
-    with idle_lock:
-        if not models_loaded:
-            return
-
-        idle_duration = time.time() - last_access_time
-        if idle_duration < IDLE_TIMEOUT_SECONDS:
-            return
-
-        logger.info(
-            f"Models idle for {idle_duration:.0f}s, unloading to free GPU memory..."
-        )
-
-        try:
-            # Unload models
-            voice_design_model = None
-            base_model = None
-            models_loaded = False
-
-            # Clear GPU cache
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                logger.info("GPU cache cleared")
-
-            logger.info("Models unloaded due to idle timeout")
-        except Exception as e:
-            logger.error(f"Error unloading models: {e}", exc_info=True)
-
-
-def idle_monitor_loop():
-    """Background thread loop that monitors for idle models."""
-    global idle_monitor_running
-    logger.info("Idle monitor thread started")
-
-    while idle_monitor_running:
-        try:
-            unload_models_if_idle()
-        except Exception as e:
-            logger.error(f"Error in idle monitor: {e}", exc_info=True)
-
-        # Sleep with periodic checks to allow quick shutdown
-        for _ in range(IDLE_CHECK_INTERVAL):
-            if not idle_monitor_running:
-                break
-            time.sleep(1)
-
-    logger.info("Idle monitor thread stopped")
-
-
-def start_idle_monitor():
-    """Start the idle monitor background thread."""
-    global idle_monitor_thread, idle_monitor_running
-
-    with idle_lock:
-        if idle_monitor_running:
-            return
-
-        idle_monitor_running = True
-        idle_monitor_thread = threading.Thread(target=idle_monitor_loop, daemon=True)
-        idle_monitor_thread.start()
-        logger.info(f"Started idle monitor (timeout: {IDLE_TIMEOUT_SECONDS}s)")
-
-
-def stop_idle_monitor():
-    """Stop the idle monitor background thread."""
-    global idle_monitor_running
-
-    with idle_lock:
-        idle_monitor_running = False
-
-    if idle_monitor_thread and idle_monitor_thread.is_alive():
-        idle_monitor_thread.join(timeout=5.0)
-        logger.info("Idle monitor stopped")
-
-
-def audio_to_base64(wav_array: np.ndarray, sample_rate: int) -> str:
-    """Convert audio array to base64-encoded WAV."""
-    buffer = BytesIO()
-    sf.write(buffer, wav_array, sample_rate, format="WAV")
-    buffer.seek(0)
-    return base64.b64encode(buffer.read()).decode()
-
-
-def base64_to_audio(b64: str) -> tuple[np.ndarray, int]:
-    """Convert base64 WAV to audio array and sample rate."""
-    audio_bytes = base64.b64decode(b64)
-    buffer = BytesIO(audio_bytes)
-    audio, sr = sf.read(buffer)
-    return audio, sr
-
-
-def load_models():
-    """Load models lazily on first request or via preload endpoint."""
-    global voice_design_model, base_model, models_loaded
-
-    with idle_lock:
-        if models_loaded:
-            return
-
-    try:
-        device = get_device()
-        dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-
-        logger.info(f"Loading models on {device} with {dtype}...")
-
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        logger.info("-" * 60)
-        logger.info("Loading VoiceDesign model...")
-        start = time.time()
-        voice_design_model = Qwen3TTSModel.from_pretrained(
-            "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
-            device_map=device,
-            dtype=dtype,
-        )
-        logger.info(f"VoiceDesign model loaded in {time.time() - start:.1f}s")
-
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        logger.info("-" * 60)
-        logger.info("Loading Base model...")
-        start = time.time()
-        base_model = Qwen3TTSModel.from_pretrained(
-            "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
-            device_map=device,
-            dtype=dtype,
-        )
-        logger.info(f"Base model loaded in {time.time() - start:.1f}s")
-
-        with idle_lock:
-            models_loaded = True
-            update_last_access_time()
-
-        logger.info("-" * 60)
-        logger.info("All models loaded successfully!")
-
-    except Exception as e:
-        logger.error(f"Failed to load models: {e}", exc_info=True)
-        raise
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Lazy load models - don't load until first request."""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application lifespan."""
     logger.info("=" * 60)
-    logger.info("Volsung - Voice Synthesis Server")
+    logger.info("Volsung Coordinator - Gateway for Audio Generation Services")
     logger.info("=" * 60)
-    logger.info("Models will load on first request to save GPU memory")
-    logger.info("POST /preload to load models manually")
+    logger.info(f"TTS Service:    {TTS_SERVICE_URL}")
+    logger.info(f"Music Service:  {MUSIC_SERVICE_URL}")
+    logger.info(f"SFX Service:    {SFX_SERVICE_URL}")
+    logger.info("=" * 60)
     logger.info("")
     logger.info("Endpoints:")
-    logger.info("  GET  /health        - Health check")
+    logger.info("  GET  /health        - Health check (aggregates all services)")
     logger.info("  GET  /doc           - API documentation")
-    logger.info("  POST /preload       - Load models now")
-    logger.info("  POST /voice/design     - Generate voice from description")
-    logger.info("  POST /voice/synthesize - Synthesize with cloned voice")
-    logger.info("  POST /music/generate   - Generate music from description")
-    logger.info("  POST /sfx/generate     - Generate sound effects")
-    logger.info("  POST /sfx/layer        - Generate layered SFX")
-    logger.info("  GET  /music/info       - Music module info")
-    logger.info("  GET  /sfx/health       - SFX module health")
+    logger.info("  POST /preload       - Preload models in all services")
+    logger.info("  ANY  /voice/*       - Forward to TTS service")
+    logger.info("  ANY  /music/*       - Forward to Music service")
+    logger.info("  ANY  /sfx/*         - Forward to SFX service")
     logger.info("=" * 60)
-    start_idle_monitor()
+
+    # Discover services on startup
+    services = await discover_services(
+        ports={
+            "tts": 8001,
+            "music": 8002,
+            "sfx": 8003,
+        }
+    )
+
+    for name, available in services.items():
+        status = "✓" if available else "✗"
+        logger.info(f"Service '{name}': {status}")
+
+    yield
+
+    # Cleanup on shutdown
+    logger.info("Shutting down coordinator...")
+    await close_service_registry()
+    _service_registry = None
+
+
+app = FastAPI(
+    title="Volsung Coordinator",
+    description="Gateway for Volsung audio generation microservices",
+    version="2.0.0",
+    lifespan=lifespan,
+)
+
+
+# ============================================================================
+# Health & Status Endpoints
+# ============================================================================
 
 
 @app.get("/health", response_model=HealthResponse)
 async def health():
-    """Check server health status including module status."""
+    """Check health status of all services.
+
+    Aggregates health information from:
+    - TTS service (port 8001)
+    - Music service (port 8002)
+    - SFX service (port 8003)
+
+    Returns:
+        HealthResponse with overall status and per-service details
+    """
+    registry = get_registry()
+    service_health = await registry.health_check_all()
+
+    available = []
+    unavailable = []
+    services_info: Dict[str, Any] = {}
+
+    for name, info in service_health.items():
+        service_data = {
+            "healthy": info.is_healthy,
+            "url": info.url,
+        }
+        if info.response_time_ms:
+            service_data["response_time_ms"] = round(info.response_time_ms, 2)
+        if info.error:
+            service_data["error"] = info.error
+
+        services_info[name] = service_data
+
+        if info.is_healthy:
+            available.append(name)
+        else:
+            unavailable.append(name)
+
+    overall_status = "healthy" if len(available) > 0 else "degraded"
+    if len(unavailable) == 0:
+        overall_status = "healthy"
+    elif len(available) == 0:
+        overall_status = "unavailable"
+
     return HealthResponse(
-        status="healthy",
-        voice_design_model=voice_design_model is not None,
-        base_model=base_model is not None,
-        music_model=music_model is not None,
-        sfx_model=sfx_model is not None,
-        tts_router=True,
-        music_router=True,
-        sfx_router=True,
+        status=overall_status,
+        coordinator="healthy",
+        services=services_info,
+        available=available,
+        unavailable=unavailable,
     )
 
 
 @app.get("/doc")
-async def documentation() -> Dict[str, Any]:
-    """Get full API documentation with examples."""
+async def documentation():
+    """Get full API documentation.
+
+    Returns:
+        DocumentationResponse with service endpoints and usage examples
+    """
     return {
-        "name": "Volsung",
-        "version": "1.0.0",
-        "description": "Voice synthesis server for Qwen3-TTS",
+        "name": "Volsung Coordinator",
+        "version": "2.0.0",
+        "description": "Gateway for Volsung audio generation microservices",
+        "architecture": "microservices",
+        "services": {
+            "tts": {
+                "url": TTS_SERVICE_URL,
+                "endpoints": [
+                    "GET  /health - Health check",
+                    "POST /voice/design - Generate voice from description",
+                    "POST /voice/synthesize - Synthesize with cloned voice",
+                ],
+            },
+            "music": {
+                "url": MUSIC_SERVICE_URL,
+                "endpoints": [
+                    "GET  /health - Health check",
+                    "GET  /info - Service information",
+                    "POST /music/generate - Generate music from description",
+                ],
+            },
+            "sfx": {
+                "url": SFX_SERVICE_URL,
+                "endpoints": [
+                    "GET  /health - Health check",
+                    "POST /sfx/generate - Generate sound effects",
+                    "POST /sfx/layer - Generate layered SFX",
+                ],
+            },
+        },
         "endpoints": {
             "GET /health": {
-                "description": "Check server status and model load state",
-                "output": {
+                "description": "Check health of all services",
+                "example_response": {
                     "status": "healthy",
-                    "voice_design_model": True,
-                    "base_model": True,
-                    "music_model": True,
-                    "sfx_model": True,
+                    "coordinator": "healthy",
+                    "services": {
+                        "tts": {"healthy": True, "response_time_ms": 12.5},
+                        "music": {"healthy": True, "response_time_ms": 8.3},
+                        "sfx": {"healthy": True, "response_time_ms": 15.1},
+                    },
+                    "available": ["tts", "music", "sfx"],
+                    "unavailable": [],
                 },
             },
             "POST /preload": {
-                "description": "Preload specific models into GPU memory. Models parameter accepts: ['qwen3', 'styletts2', 'music', 'sfx'] or 'all'",
-                "input": {
-                    "models": "Array of model names or 'all' (default: ['qwen3']). Options: 'qwen3', 'styletts2', 'music', 'sfx'"
-                },
-                "behavior": {
-                    "default": "Unloads existing models, loads requested models",
-                    "smart_loading": "Skips models already in memory (no reload unless needed)",
-                    "gpu_conservation": "Only requested models are loaded to minimize GPU memory usage",
-                },
-                "output": {
+                "description": "Preload models across all services",
+                "request": {"models": ["all"]},
+                "example_response": {
                     "status": "ok",
-                    "loaded": ["List of newly loaded models"],
-                    "unloaded": ["List of models unloaded to make room"],
-                    "already_loaded": ["List of models already in memory"],
-                },
-                "examples": {
-                    "preload_qwen3_only": {"models": ["qwen3"]},
-                    "preload_styletts2": {"models": ["styletts2"]},
-                    "preload_all_models": {"models": "all"},
-                    "preload_multiple_specific": {"models": ["qwen3", "music"]},
-                },
-                "workflow_note": "Preload models before first request to avoid wait time. For example, call POST /preload with {'models': ['qwen3']} at server startup or when you know which models you'll need.",
-            },
-            "POST /music/generate": {
-                "description": "Generate music from text description (up to 30 seconds)",
-                "input": {
-                    "description": "Natural language music description (e.g., 'Upbeat acoustic guitar for audiobook background')",
-                    "duration": "Duration in seconds (default: 30.0, max: 30.0)",
-                    "genre": "Optional: Genre tag (e.g., 'acoustic', 'electronic', 'classical')",
-                    "mood": "Optional: Mood tag (e.g., 'upbeat', 'calm', 'tense')",
-                    "tempo": "Optional: Tempo hint - 'slow', 'medium', or 'fast'",
-                },
-                "output": {
-                    "audio": "Base64-encoded WAV audio",
-                    "sample_rate": 24000,
-                    "metadata": {
-                        "duration": "Audio duration in seconds",
-                        "sample_rate": 24000,
-                        "genre_tags": ["acoustic", "guitar", "upbeat"],
-                        "generation_time_ms": "Time taken to generate",
-                        "model_used": "Model identifier",
+                    "results": {
+                        "tts": {"status": "loaded"},
+                        "music": {"status": "loaded"},
+                        "sfx": {"status": "loaded"},
                     },
-                },
-                "example": {
-                    "description": "Peaceful acoustic guitar for meditation audiobook background",
-                    "duration": 15.0,
-                    "genre": "acoustic",
-                    "mood": "calm",
-                    "tempo": "slow",
-                },
-            },
-            "POST /sfx/generate": {
-                "description": "Generate sound effects from text description (up to 10 seconds)",
-                "input": {
-                    "description": "Natural language SFX description (e.g., 'footsteps on gravel')",
-                    "duration": "Duration in seconds (default: 5.0, max: 10.0)",
-                    "category": "Optional: Category tag (e.g., 'nature', 'mechanical', 'urban', 'fantasy')",
-                },
-                "output": {
-                    "audio": "Base64-encoded WAV audio",
-                    "sample_rate": 24000,
-                    "metadata": {
-                        "duration": "Audio duration in seconds",
-                        "sample_rate": 24000,
-                        "category": "SFX category",
-                        "generation_time_ms": "Time taken to generate",
-                        "model_used": "Model identifier",
-                    },
-                },
-                "example": {
-                    "description": "Footsteps on gravel path",
-                    "duration": 3.0,
-                    "category": "nature",
-                },
-            },
-            "POST /sfx/layer": {
-                "description": "Generate combined/layered sound effects",
-                "input": {
-                    "layers": "Array of SFX generation requests to combine",
-                },
-                "output": {
-                    "audio": "Base64-encoded combined WAV audio",
-                    "sample_rate": 24000,
-                    "layers_metadata": "Metadata for each layer",
-                    "total_duration": "Duration of combined audio",
-                },
-                "example": {
-                    "layers": [
-                        {
-                            "description": "Thunder rumbling",
-                            "duration": 5.0,
-                            "category": "nature",
-                        },
-                        {
-                            "description": "Rain falling",
-                            "duration": 5.0,
-                            "category": "nature",
-                        },
-                    ],
                 },
             },
             "POST /voice/design": {
-                "description": "Generate voice sample from natural language description (Qwen3-TTS or StyleTTS 2)",
-                "input": {
-                    "text": "Sample text to speak (e.g., 'Hello, I am John. Nice to meet you.')",
-                    "language": "Language: English, Chinese, Japanese, Korean, German, French, Russian, Portuguese, Spanish, Italian, or Auto",
-                    "instruct": "Natural language voice description (e.g., 'A warm, elderly man with a Southern accent')",
-                    "backend": "Optional: TTS backend to use - 'qwen3' (default) or 'styletts2'",
-                    "styletts_params": "Optional (StyleTTS 2 only): embedding_scale (1.0-10.0, emotion intensity), alpha (0.0-1.0, voice similarity), beta (0.0-1.0, emotion similarity), diffusion_steps (3-20, style diversity)",
-                },
-                "output": {"audio": "Base64-encoded WAV audio", "sample_rate": 24000},
-                "example": {
-                    "text": "Hello, I am John. Nice to meet you.",
+                "description": "Generate voice from description (proxied to TTS)",
+                "request": {
+                    "text": "Hello, I am John.",
+                    "instruct": "A warm, elderly man's voice",
                     "language": "English",
-                    "instruct": "A warm, elderly man's voice with a slight Southern accent and gravelly tone",
-                },
-                "example_styletts": {
-                    "text": "This is an exciting announcement!",
-                    "language": "English",
-                    "instruct": "A passionate speaker with high energy",
-                    "backend": "styletts2",
-                    "styletts_params": {
-                        "embedding_scale": 2.0,
-                        "alpha": 0.3,
-                        "beta": 0.7,
-                        "diffusion_steps": 5,
-                    },
-                },
-                "note": "StyleTTS 2 uses text-driven emotion control - describe emotions in the instruct field and tune with embedding_scale",
-            },
-            "POST /voice/styletts/design": {
-                "description": "Generate voice sample using StyleTTS 2 (dedicated endpoint)",
-                "input": {
-                    "text": "Sample text to speak",
-                    "language": "Language code (English, Chinese, etc.)",
-                    "instruct": "Voice and emotion description",
-                    "styletts_params": "Optional: embedding_scale (1.0-10.0, emotion intensity), alpha (0.0-1.0, voice similarity), beta (0.0-1.0, emotion similarity), diffusion_steps (3-20, style diversity)",
-                },
-                "output": {"audio": "Base64-encoded WAV audio", "sample_rate": 24000},
-                "example": {
-                    "text": "Welcome to the future of speech synthesis!",
-                    "language": "English",
-                    "instruct": "An enthusiastic presenter with dynamic energy",
-                    "styletts_params": {
-                        "embedding_scale": 2.5,
-                        "alpha": 0.3,
-                        "beta": 0.7,
-                        "diffusion_steps": 5,
-                    },
                 },
             },
-            "POST /voice/synthesize": {
-                "description": "Synthesize text using cloned voice from reference audio",
-                "input": {
-                    "ref_audio": "Base64-encoded WAV (from /voice/design output)",
-                    "ref_text": "Transcript of the reference audio",
-                    "text": "New text to synthesize in the cloned voice",
-                    "language": "Language code (default: English)",
-                },
-                "output": {"audio": "Base64-encoded WAV audio", "sample_rate": 24000},
-                "workflow": "1. Call /voice/design to get audio sample\n2. Store the audio and the text you sent\n3. Call /voice/synthesize with that audio + transcript + new text",
-            },
-            "GET /music/info": {
-                "description": "Get music module information and status",
-                "output": {
-                    "status": "ready|unloaded|not_initialized",
-                    "model_id": "Music model identifier",
-                    "model_name": "Music model name",
-                    "is_loaded": "Whether model is loaded",
-                    "device": "Device used (cuda, cpu, etc.)",
+            "POST /music/generate": {
+                "description": "Generate music from description (proxied to Music)",
+                "request": {
+                    "description": "Peaceful acoustic guitar",
+                    "duration": 10.0,
                 },
             },
-            "GET /sfx/health": {
-                "description": "Check SFX module health status",
-                "output": {
-                    "status": "healthy|unloaded|uninitialized",
-                    "model_loaded": "Whether SFX model is loaded",
-                    "model_name": "SFX model name",
-                    "idle_seconds": "Time since last use",
+            "POST /sfx/generate": {
+                "description": "Generate sound effects (proxied to SFX)",
+                "request": {
+                    "description": "Footsteps on gravel",
+                    "duration": 3.0,
                 },
             },
         },
-        "workflows": {
-            "voice_cloning": {
-                "name": "Voice Cloning (Qwen3-TTS or StyleTTS 2)",
-                "steps": [
-                    "1. Choose backend: Qwen3-TTS (text-to-voice) or StyleTTS 2 (emotion-rich)",
-                    "2. POST /voice/design with text, instruct, and optional backend/styletts_params",
-                    "3. Save the returned audio as reference",
-                    "4. POST /voice/synthesize with ref_audio, ref_text, and new text",
-                    "5. Result: Audio in the cloned voice",
-                ],
-                "note": "StyleTTS 2 adds emotion control via embedding_scale parameter (1.0-10.0). Describe emotions in the instruct field.",
-            },
-            "audiobook_production": {
-                "name": "Audiobook Production",
-                "steps": [
-                    "1. Generate TTS audio using /voice/design + /voice/synthesize",
-                    "2. Generate background music using /music/generate",
-                    "3. Generate sound effects using /sfx/generate or /sfx/layer",
-                    "4. Result: Mixed audiobook chapter",
-                ],
-            },
-        },
-        "models": {
-            "voice_design": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
-            "base_clone": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
-            "styletts2": "yl4579/StyleTTS2-LibriTTS",
-            "music": "facebook/musicgen-small",
-            "sfx": "audiogen-medium",
-        },
-        "routers": {
-            "/voice": "TTS module - voice design and synthesis",
-            "/music": "Music generation module",
-            "/sfx": "Sound effects module",
+        "environment_variables": {
+            "TTS_SERVICE_URL": f"TTS service URL (default: {TTS_SERVICE_URL})",
+            "MUSIC_SERVICE_URL": f"Music service URL (default: {MUSIC_SERVICE_URL})",
+            "SFX_SERVICE_URL": f"SFX service URL (default: {SFX_SERVICE_URL})",
         },
     }
 
 
 @app.post("/preload", response_model=PreloadResponse)
-async def preload(req: PreloadRequest):
-    """Download and cache models.
+async def preload(request: PreloadRequest):
+    """Preload models across all services.
+
+    Forwards preload requests to each service that supports it.
+    Services that are unavailable will be skipped.
 
     Args:
-        req: PreloadRequest containing models to preload.
-            Can be a single model name or list of names:
-            - "qwen3": Qwen3-TTS voice models
-            - "styletts2": StyleTTS 2 voice cloning
-            - "music": MusicGen music generation
-            - "sfx": AudioLDM sound effects
-            - "all": All models (default)
+        request: PreloadRequest with list of models to preload
 
     Returns:
-        PreloadResponse with status indicating which models were loaded/unloaded.
-
-    Examples:
-        {"models": ["qwen3"]} - Load only Qwen3-TTS
-        {"models": ["styletts2", "music"]} - Load StyleTTS 2 and MusicGen
-        {"models": "all"} - Load all models
+        PreloadResponse with results from each service
     """
-    from volsung.models.preload_manager import get_preload_manager
+    registry = get_registry()
+    results: Dict[str, Any] = {}
+    any_success = False
 
-    try:
-        manager = get_preload_manager()
+    # Services that support preloading
+    preload_endpoints = {
+        "tts": ("/preload", "tts"),
+        "music": ("/preload", "music"),
+        "sfx": ("/preload", "sfx"),
+    }
 
-        # Handle single string or list
-        if isinstance(req.models, str):
-            requested = [req.models]
-        else:
-            requested = req.models
+    for service_name, (endpoint, client_name) in preload_endpoints.items():
+        try:
+            client = registry.get_client(client_name)
+            response = await client.forward(
+                endpoint,
+                method="POST",
+                json={"models": request.models},
+                skip_retry=True,  # Don't retry preloads
+            )
 
-        result = manager.preload(requested)
+            if response.status_code == 200:
+                results[service_name] = response.json()
+                any_success = True
+            else:
+                results[service_name] = {
+                    "status": "error",
+                    "code": response.status_code,
+                }
 
-        update_last_access_time()
-        return PreloadResponse(
-            status=result["status"],
-            models=result["models"],
-            loaded=result.get("loaded", []),
-            unloaded=result.get("unloaded", []),
-        )
-    except ValueError as e:
-        logger.error(f"Invalid preload request: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error(f"Preload failed: {e}")
-        raise HTTPException(
-            status_code=500, detail=f"Failed to preload models: {str(e)}"
-        )
+        except HTTPException as e:
+            results[service_name] = {
+                "status": "unavailable",
+                "error": e.detail
+                if isinstance(e.detail, str)
+                else "Service unavailable",
+            }
+        except Exception as e:
+            results[service_name] = {
+                "status": "error",
+                "error": str(e),
+            }
+
+    status = "ok" if any_success else "failed"
+    return PreloadResponse(status=status, results=results)
 
 
 # ============================================================================
-# Music Generation Endpoints
+# Service Routing Endpoints
 # ============================================================================
 
 
-@app.post("/music/generate", response_model=MusicGenerateResponse)
-async def music_generate(req: MusicGenerateRequest):
-    """
-    Generate music from text description.
-
-    Creates background music up to 30 seconds from natural language description.
-    Useful for audiobook background music, ambience, etc.
-    """
-    # Validate duration
-    if req.duration > 30.0:
-        raise HTTPException(status_code=400, detail="Duration must be <= 30 seconds")
-    if req.duration <= 0:
-        raise HTTPException(status_code=400, detail="Duration must be positive")
-
-    # Lazy load models on first request
-    if not models_loaded:
-        load_models()
-
-    update_last_access_time()
-
-    if music_model is None:
-        raise HTTPException(status_code=503, detail="Music model not loaded")
-
-    try:
-        logger.info(
-            f"[MUSIC_GENERATE] Request: description='{req.description[:50]}...' duration={req.duration}s"
-        )
-        start_time = time.time()
-
-        wavs, sr = music_model.generate_music(
-            description=req.description,
-            duration=req.duration,
-            genre=req.genre,
-            mood=req.mood,
-            tempo=req.tempo,
-        )
-
-        elapsed_ms = (time.time() - start_time) * 1000
-        duration_seconds = len(wavs[0]) / sr
-        logger.info(
-            f"[MUSIC_GENERATE] Generated: duration={duration_seconds:.2f}s sample_rate={sr} elapsed={elapsed_ms:.0f}ms"
-        )
-
-        audio_base64 = audio_to_base64(wavs[0], sr)
-        audio_size_kb = len(audio_base64) * 3 // 4 // 1024
-        logger.info(f"[MUSIC_GENERATE] Response: audio_size={audio_size_kb}KB")
-
-        # Build genre tags from request
-        genre_tags = []
-        if req.genre:
-            genre_tags.append(req.genre)
-        if req.mood:
-            genre_tags.append(req.mood)
-        if req.tempo:
-            genre_tags.append(req.tempo)
-
-        metadata = MusicMetadata(
-            duration=duration_seconds,
-            sample_rate=sr,
-            genre_tags=genre_tags,
-            generation_time_ms=elapsed_ms,
-            model_used="musicgen-large",  # Placeholder - actual model TBD
-        )
-
-        return MusicGenerateResponse(
-            audio=audio_base64, sample_rate=sr, metadata=metadata
-        )
-
-    except Exception as e:
-        logger.error(f"[MUSIC_GENERATE] Failed: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500, detail=f"Music generation failed: {str(e)}"
-        )
-
-
-# ============================================================================
-# SFX Generation Endpoints
-# ============================================================================
-
-
-@app.post("/sfx/generate", response_model=SFXGenerateResponse)
-async def sfx_generate(req: SFXGenerateRequest):
-    """
-    Generate sound effects from text description.
-
-    Creates sound effects up to 10 seconds from natural language description.
-    Useful for audiobook sound effects, ambient sounds, etc.
-    """
-    # Validate duration
-    if req.duration > 10.0:
-        raise HTTPException(status_code=400, detail="Duration must be <= 10 seconds")
-    if req.duration <= 0:
-        raise HTTPException(status_code=400, detail="Duration must be positive")
-
-    # Lazy load models on first request
-    if not models_loaded:
-        load_models()
-
-    update_last_access_time()
-
-    if sfx_model is None:
-        raise HTTPException(status_code=503, detail="SFX model not loaded")
-
-    try:
-        logger.info(
-            f"[SFX_GENERATE] Request: description='{req.description[:50]}...' duration={req.duration}s category={req.category}"
-        )
-        start_time = time.time()
-
-        wavs, sr = sfx_model.generate_sfx(
-            description=req.description,
-            duration=req.duration,
-            category=req.category,
-        )
-
-        elapsed_ms = (time.time() - start_time) * 1000
-        duration_seconds = len(wavs[0]) / sr
-        logger.info(
-            f"[SFX_GENERATE] Generated: duration={duration_seconds:.2f}s sample_rate={sr} elapsed={elapsed_ms:.0f}ms"
-        )
-
-        audio_base64 = audio_to_base64(wavs[0], sr)
-        audio_size_kb = len(audio_base64) * 3 // 4 // 1024
-        logger.info(f"[SFX_GENERATE] Response: audio_size={audio_size_kb}KB")
-
-        metadata = SFXMetadata(
-            duration=duration_seconds,
-            sample_rate=sr,
-            category=req.category,
-            generation_time_ms=elapsed_ms,
-            model_used="audiogen-medium",  # Placeholder - actual model TBD
-        )
-
-        return SFXGenerateResponse(
-            audio=audio_base64, sample_rate=sr, metadata=metadata
-        )
-
-    except Exception as e:
-        logger.error(f"[SFX_GENERATE] Failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"SFX generation failed: {str(e)}")
-
-
-@app.post("/sfx/layer", response_model=SFXLayerResponse)
-async def sfx_layer(req: SFXLayerRequest):
-    """
-    Generate combined/layered sound effects.
-
-    Creates multiple sound effects and layers them together.
-    Useful for complex audio scenes.
-    """
-    # Validate layers
-    if not req.layers:
-        raise HTTPException(status_code=400, detail="At least one layer required")
-    if len(req.layers) > 5:
-        raise HTTPException(status_code=400, detail="Maximum 5 layers allowed")
-
-    for i, layer in enumerate(req.layers):
-        if layer.duration > 10.0:
-            raise HTTPException(
-                status_code=400, detail=f"Layer {i + 1}: Duration must be <= 10 seconds"
-            )
-        if layer.duration <= 0:
-            raise HTTPException(
-                status_code=400, detail=f"Layer {i + 1}: Duration must be positive"
-            )
-
-    # Lazy load models on first request
-    if not models_loaded:
-        load_models()
-
-    update_last_access_time()
-
-    if sfx_model is None:
-        raise HTTPException(status_code=503, detail="SFX model not loaded")
-
-    try:
-        logger.info(f"[SFX_LAYER] Request: {len(req.layers)} layers")
-        start_time = time.time()
-
-        # Generate each layer
-        generated_layers = []
-        layers_metadata = []
-        max_duration = 0.0
-
-        for i, layer_req in enumerate(req.layers):
-            layer_start = time.time()
-
-            wavs, sr = sfx_model.generate_sfx(
-                description=layer_req.description,
-                duration=layer_req.duration,
-                category=layer_req.category,
-            )
-
-            layer_duration = len(wavs[0]) / sr
-            layer_elapsed_ms = (time.time() - layer_start) * 1000
-
-            generated_layers.append((wavs[0], sr))
-            layers_metadata.append(
-                SFXMetadata(
-                    duration=layer_duration,
-                    sample_rate=sr,
-                    category=layer_req.category,
-                    generation_time_ms=layer_elapsed_ms,
-                    model_used="audiogen-medium",
-                )
-            )
-            max_duration = max(max_duration, layer_duration)
-
-            logger.info(
-                f"[SFX_LAYER] Layer {i + 1}: {layer_duration:.2f}s '{layer_req.description[:30]}...'"
-            )
-
-        # Combine layers (simple mix for now - can be enhanced)
-        combined_audio = combine_audio_layers(generated_layers)
-
-        elapsed_ms = (time.time() - start_time) * 1000
-        audio_base64 = audio_to_base64(combined_audio, sr)
-        audio_size_kb = len(audio_base64) * 3 // 4 // 1024
-
-        logger.info(
-            f"[SFX_LAYER] Combined: duration={max_duration:.2f}s elapsed={elapsed_ms:.0f}ms size={audio_size_kb}KB"
-        )
-
-        return SFXLayerResponse(
-            audio=audio_base64,
-            sample_rate=sr,
-            layers_metadata=layers_metadata,
-            total_duration=max_duration,
-        )
-
-    except Exception as e:
-        logger.error(f"[SFX_LAYER] Failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"SFX layering failed: {str(e)}")
-
-
-def combine_audio_layers(layers: list[tuple]) -> np.ndarray:
-    """
-    Combine multiple audio layers into a single audio track.
+async def forward_to_service(
+    request: Request,
+    service_name: str,
+    path: str,
+) -> Response:
+    """Forward a request to the appropriate service.
 
     Args:
-        layers: List of (audio_array, sample_rate) tuples
+        request: Incoming FastAPI request
+        service_name: Name of the service (tts, music, sfx)
+        path: Path to forward to
 
     Returns:
-        Combined audio array
+        Response from the service
+
+    Raises:
+        HTTPException: If service is unavailable or returns an error
     """
-    if not layers:
-        return np.array([])
+    registry = get_registry()
+    client = registry.get_client(service_name)
 
-    # Find max length
-    max_length = max(len(layer[0]) for layer in layers)
-    sr = layers[0][1]
+    # Read request body
+    body = await request.body()
+    json_data = None
+    if body:
+        try:
+            import json
 
-    # Initialize output array
-    combined = np.zeros(max_length)
+            json_data = json.loads(body)
+        except json.JSONDecodeError:
+            # Not JSON, pass as raw data
+            pass
 
-    # Mix all layers together
-    for audio, layer_sr in layers:
-        # Pad if shorter
-        if len(audio) < max_length:
-            audio = np.pad(audio, (0, max_length - len(audio)))
-        combined += audio
+    # Prepare headers
+    headers = dict(request.headers)
+    headers.pop("host", None)  # Remove host header (will be set by client)
 
-    # Normalize to prevent clipping
-    max_val = np.max(np.abs(combined))
-    if max_val > 1.0:
-        combined = combined / max_val
+    try:
+        response = await client.forward(
+            path,
+            method=request.method,
+            json=json_data,
+            data=body if not json_data else None,
+            headers=headers,
+        )
 
-    return combined.astype(np.float32)
+        # Forward response
+        return Response(
+            content=response.content,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            media_type=response.headers.get("content-type"),
+        )
 
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error forwarding to {service_name}: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "Service unavailable",
+                "service": service_name,
+                "message": str(e),
+                "suggestion": f"Check that the {service_name} service is running",
+            },
+        )
+
+
+# TTS Service Routes
+@app.api_route("/voice/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def tts_proxy(request: Request, path: str):
+    """Proxy all voice-related requests to TTS service.
+
+    Routes:
+        POST /voice/design - Generate voice from description
+        POST /voice/synthesize - Synthesize with cloned voice
+        GET  /voice/* - Other TTS endpoints
+    """
+    return await forward_to_service(request, "tts", f"/voice/{path}")
+
+
+# Music Service Routes
+@app.api_route("/music/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def music_proxy(request: Request, path: str):
+    """Proxy all music-related requests to Music service.
+
+    Routes:
+        POST /music/generate - Generate music from description
+        GET  /music/info - Service information
+        GET  /music/* - Other Music endpoints
+    """
+    return await forward_to_service(request, "music", f"/music/{path}")
+
+
+# SFX Service Routes
+@app.api_route("/sfx/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def sfx_proxy(request: Request, path: str):
+    """Proxy all SFX-related requests to SFX service.
+
+    Routes:
+        POST /sfx/generate - Generate sound effects
+        POST /sfx/layer - Generate layered SFX
+        GET  /sfx/* - Other SFX endpoints
+    """
+    return await forward_to_service(request, "sfx", f"/sfx/{path}")
+
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
 
 if __name__ == "__main__":
     import uvicorn
 
+    logger.info(
+        f"Starting Volsung Coordinator on {COORDINATOR_HOST}:{COORDINATOR_PORT}"
+    )
     uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=8000,
+        "volsung.server:app",
+        host=COORDINATOR_HOST,
+        port=COORDINATOR_PORT,
         log_level="info",
         access_log=True,
     )

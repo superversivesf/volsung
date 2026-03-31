@@ -1,5 +1,5 @@
 # Volsung Coordinator Service Dockerfile
-# API Gateway that routes requests to TTS, Music, and SFX services
+# API Gateway that routes requests to all specialized services
 
 FROM python:3.10-slim
 
@@ -17,14 +17,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements for coordinator (lightweight - no ML deps)
-# Using requirements.txt with only coordinator essentials
 COPY requirements.txt /app/requirements.txt
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Note: No ML models needed for coordinator (just a gateway service)
-# Container is already self-contained
+# Create outputs directory
+RUN mkdir -p /app/outputs
 
 # Copy the volsung package
 COPY volsung/__init__.py /app/volsung/__init__.py
@@ -36,9 +35,11 @@ COPY volsung/server.py /app/volsung/server.py
 ENV PYTHONPATH=/app
 
 # Environment variables for service URLs (configured via docker-compose)
-ENV TTS_SERVICE_URL=http://tts:8001
-ENV MUSIC_SERVICE_URL=http://music:8002
-ENV SFX_SERVICE_URL=http://sfx:8003
+ENV QWEN_VOICE_SERVICE_URL=http://qwen-voice:8001
+ENV QWEN_BASE_SERVICE_URL=http://qwen-base:8002
+ENV STYLETTS_SERVICE_URL=http://styletts:8003
+ENV MUSIC_SERVICE_URL=http://music:8004
+ENV SFX_SERVICE_URL=http://sfx:8005
 ENV COORDINATOR_HOST=0.0.0.0
 ENV COORDINATOR_PORT=8000
 

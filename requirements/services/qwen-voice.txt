@@ -1,0 +1,21 @@
+# Qwen VoiceDesign Service Requirements
+# Only VoiceDesign model - isolated from Base model for modularity
+
+# Core FastAPI stack
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+pydantic>=2.0.0
+
+# Audio processing
+soundfile>=0.12.1
+numpy>=1.24.0
+
+# Qwen-TTS specific dependencies
+transformers==4.57.3
+huggingface-hub>=0.34.0
+torch>=2.2.0
+qwen-tts>=0.1.0
+
+# Other dependencies
+einops>=0.7.0
+transformers-stream-generator>=0.0.4

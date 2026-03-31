@@ -1,38 +1,66 @@
-"""
-Standalone SFX (Sound Effects) Service - AudioLDM via diffusers.
+"""AudioLDM SFX Service for Volsung.
 
-This service provides sound effects generation using AudioLDM2 from the diffusers library.
-It runs as a standalone FastAPI service on port 8003.
+A standalone FastAPI service that provides AudioLDM2 sound effects generation endpoints.
+Runs on port 8005 and handles SFX generation from text descriptions.
 
-Volsung SFX Service - Standalone sound effects generation using AudioLDM2.
+Example:
+    # Start the service
+    python -m volsung.services.sfx_service
+
+    # Or using uvicorn directly
+    uvicorn volsung.services.sfx_service:app --host 0.0.0.0 --port 8005
+
+Environment Variables:
+    SFX_SERVICE_HOST: Server bind address (default: 0.0.0.0)
+    SFX_SERVICE_PORT: Server port (default: 8005)
+    SFX_DEVICE: Device override (default: auto-detected)
 """
+
+from __future__ import annotations
 
 import base64
 import logging
+import os
 import time
+from contextlib import asynccontextmanager
 from io import BytesIO
 from typing import Optional
 
 import numpy as np
 import soundfile as sf
 import torch
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
-# ============================================================================
+# =============================================================================
+# Configuration
+# =============================================================================
+
+
+class SFXServiceConfig(BaseModel):
+    """SFX service configuration."""
+
+    host: str = Field(default_factory=lambda: os.getenv("SFX_SERVICE_HOST", "0.0.0.0"))
+    port: int = Field(
+        default_factory=lambda: int(os.getenv("SFX_SERVICE_PORT", "8005"))
+    )
+    model_size: str = Field(default="base")
+    device: Optional[str] = Field(default_factory=lambda: os.getenv("SFX_DEVICE"))
+
+
+# =============================================================================
 # Pydantic Schemas
-# ============================================================================
+# =============================================================================
 
 
-class SFXGenerateRequest(BaseModel):
+class GenerateRequest(BaseModel):
     """Request for generating sound effects from text description."""
 
     description: str = Field(
@@ -77,7 +105,7 @@ class SFXMetadata(BaseModel):
     guidance_scale: float = Field(default=3.5, description="Guidance scale used")
 
 
-class SFXGenerateResponse(BaseModel):
+class GenerateResponse(BaseModel):
     """Response containing generated sound effect and metadata."""
 
     audio: str = Field(..., description="Base64-encoded WAV audio data")
@@ -85,27 +113,47 @@ class SFXGenerateResponse(BaseModel):
     metadata: SFXMetadata = Field(..., description="Generation metadata")
 
 
+class LoadRequest(BaseModel):
+    """Request to load the model."""
+
+    device: Optional[str] = Field(
+        default=None,
+        description="Device to load on (cuda, cpu, mps). Auto-detected if not specified.",
+    )
+
+
+class LoadResponse(BaseModel):
+    """Response from load operation."""
+
+    status: str = Field(..., description="Status: loaded or already_loaded")
+    model: str = Field(..., description="Model identifier")
+    device: str = Field(..., description="Device model is loaded on")
+    message: str = Field(..., description="Human-readable status message")
+
+
+class UnloadResponse(BaseModel):
+    """Response from unload operation."""
+
+    status: str = Field(..., description="Status: unloaded or not_loaded")
+    model: str = Field(..., description="Model identifier")
+    message: str = Field(..., description="Human-readable status message")
+
+
 class HealthResponse(BaseModel):
-    """Health check response for SFX service."""
+    """Health check response."""
 
-    status: str = Field(..., description="Service status")
-    model_loaded: bool = Field(..., description="Whether the SFX model is loaded")
-    model_name: str = Field(..., description="Name of the model")
-    device: str = Field(..., description="Device being used (cuda, cpu, mps)")
+    status: str = Field(..., description="Overall service status")
+    model: dict = Field(default_factory=dict, description="Model status")
 
 
-# ============================================================================
-# AudioLDM Generator
-# ============================================================================
+# =============================================================================
+# Model Manager Class
+# =============================================================================
 
 
-class AudioLDMGenerator:
-    """AudioLDM-based sound effects generator using diffusers.
+class AudioLDMManager:
+    """Manager for AudioLDM2 model."""
 
-    Wraps the AudioLDM2 diffusion model for high-quality sound effect generation.
-    """
-
-    # Model configurations
     MODEL_CONFIGS = {
         "base": {
             "model_id": "cvssp/audioldm2",
@@ -115,47 +163,34 @@ class AudioLDMGenerator:
             "model_id": "cvssp/audioldm2-large",
             "vram_gb": 8.0,
         },
-        "music": {
-            "model_id": "cvssp/audioldm2-music",
-            "vram_gb": 6.0,
-        },
     }
 
-    def __init__(self, model_size: str = "base"):
-        """Initialize AudioLDM generator.
+    def __init__(self, config: SFXServiceConfig):
+        self.config = config
+        self._pipeline: Optional[Any] = None
+        self._device = self._get_device()
+        self._is_loaded = False
+        self._model_id = self.MODEL_CONFIGS[config.model_size]["model_id"]
 
-        Args:
-            model_size: Model variant ("base", "large", "music")
-        """
-        if model_size not in self.MODEL_CONFIGS:
-            raise ValueError(
-                f"Unknown model size: {model_size}. "
-                f"Supported: {list(self.MODEL_CONFIGS.keys())}"
-            )
+    def _get_device(self) -> str:
+        """Get the best available device."""
+        if self.config.device:
+            return self.config.device
+        if torch.cuda.is_available():
+            return "cuda"
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
 
-        self.model_size = model_size
-        self.config = self.MODEL_CONFIGS[model_size]
-        self.model = None
-        self.device = None
-        self.dtype = None
+    def load(self, device: Optional[str] = None) -> dict:
+        """Load the AudioLDM2 model."""
+        if self._is_loaded:
+            return {
+                "status": "already_loaded",
+                "device": self._device,
+                "message": f"Model already loaded on {self._device}",
+            }
 
-    @property
-    def model_id(self) -> str:
-        """Unique identifier for this generator."""
-        return f"audioldm2-{self.model_size}"
-
-    @property
-    def model_name(self) -> str:
-        """Human-readable name."""
-        return f"AudioLDM2 {self.model_size.title()}"
-
-    def load(self, device: Optional[str] = None, dtype: Optional[str] = None) -> None:
-        """Load the AudioLDM model.
-
-        Args:
-            device: Device to load on ("cuda", "cpu", "mps")
-            dtype: Data type ("float16", "float32", "bfloat16")
-        """
         try:
             from diffusers import AudioLDM2Pipeline
         except ImportError:
@@ -163,42 +198,56 @@ class AudioLDMGenerator:
                 "AudioLDM requires diffusers. Install with: pip install diffusers"
             )
 
-        # Auto-detect device if not specified
-        if device is None:
-            device = self._get_device()
+        if device:
+            self._device = device
 
-        if dtype is None:
-            dtype = "float16" if device == "cuda" else "float32"
+        dtype = "float16" if self._device == "cuda" else "float32"
+        logger.info(f"Loading AudioLDM2 on {self._device} with {dtype}...")
 
-        self.device = device
-        self.dtype = getattr(torch, dtype)
-
-        logger.info(f"Loading {self.model_name} on {device} with {dtype}...")
-
-        # Load pipeline
-        self.model = AudioLDM2Pipeline.from_pretrained(
-            self.config["model_id"],
-            torch_dtype=self.dtype,
+        self._pipeline = AudioLDM2Pipeline.from_pretrained(
+            self._model_id,
+            torch_dtype=getattr(torch, dtype),
         )
 
-        # Move to device
-        if device != "cpu":
-            self.model = self.model.to(device)
+        if self._device != "cpu":
+            self._pipeline = self._pipeline.to(self._device)
 
-        logger.info(f"{self.model_name} loaded successfully")
+        self._is_loaded = True
+        logger.info("AudioLDM2 loaded successfully")
 
-    def unload(self) -> None:
+        return {
+            "status": "loaded",
+            "device": self._device,
+            "message": f"Model loaded successfully on {self._device}",
+        }
+
+    def unload(self) -> dict:
         """Unload the model and free resources."""
-        if self.model is not None:
-            logger.info(f"Unloading {self.model_name}...")
-            self.model = None
+        if not self._is_loaded:
+            return {"status": "not_loaded", "message": "Model was not loaded"}
 
-            # Clear GPU cache
-            if self.device and "cuda" in self.device:
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
+        logger.info("Unloading AudioLDM2...")
+        self._pipeline = None
+        self._is_loaded = False
 
-            logger.info(f"{self.model_name} unloaded")
+        import gc
+
+        gc.collect()
+        if self._device and "cuda" in self._device:
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+        logger.info("AudioLDM2 unloaded")
+
+        return {"status": "unloaded", "message": "Model unloaded successfully"}
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._is_loaded
+
+    @property
+    def device(self) -> str:
+        return self._device
 
     def generate(
         self,
@@ -208,180 +257,201 @@ class AudioLDMGenerator:
         guidance_scale: float = 3.5,
         negative_prompt: str = "",
     ) -> tuple[np.ndarray, int]:
-        """Generate sound effects from text prompt.
+        """Generate sound effects from text prompt."""
+        if not self._is_loaded:
+            self.load()
 
-        Args:
-            prompt: Text description of desired sound effect
-            duration: Target duration in seconds
-            num_inference_steps: Number of denoising steps
-            guidance_scale: Prompt adherence
-            negative_prompt: What to avoid in generation
-
-        Returns:
-            Tuple of (audio_array, sample_rate)
-        """
-        if self.model is None:
-            raise RuntimeError("Model not loaded. Call load() first.")
+        if self._pipeline is None:
+            raise RuntimeError("AudioLDM2 pipeline not loaded")
 
         # AudioLDM2 works with specific durations
         duration = max(1.0, min(10.0, duration))
 
         logger.info(
-            f"Generating SFX: '{prompt[:50]}...' "
+            f"[AudioLDM2] Generating SFX: '{prompt[:50]}...' "
             f"duration={duration}s steps={num_inference_steps}"
         )
 
-        try:
-            # Generate audio using AudioLDM2
-            output = self.model(
-                prompt,
-                negative_prompt=negative_prompt,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                audio_length_in_s=int(duration),
-            )
+        # Generate audio using AudioLDM2
+        output = self._pipeline(
+            prompt,
+            negative_prompt=negative_prompt,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            audio_length_in_s=int(duration),
+        )
 
-            # Extract audio
-            audio = output.audios[0]
-            sample_rate = output.sample_rate
+        # Extract audio
+        audio = output.audios[0]
+        sample_rate = output.sample_rate
 
-            # Ensure correct format
-            if isinstance(audio, torch.Tensor):
-                audio = audio.cpu().numpy()
+        # Ensure correct format
+        if isinstance(audio, torch.Tensor):
+            audio = audio.cpu().numpy()
 
-            # Normalize to [-1, 1] range
-            audio = audio.astype(np.float32)
-            max_val = np.max(np.abs(audio))
-            if max_val > 1.0:
-                audio = audio / max_val
+        # Normalize to [-1, 1] range
+        audio = audio.astype(np.float32)
+        max_val = np.max(np.abs(audio))
+        if max_val > 1.0:
+            audio = audio / max_val
 
-            logger.info(
-                f"Generated: duration={len(audio) / sample_rate:.2f}s "
-                f"sample_rate={sample_rate}"
-            )
+        logger.info(
+            f"[AudioLDM2] Generated: duration={len(audio) / sample_rate:.2f}s "
+            f"sample_rate={sample_rate}"
+        )
 
-            return audio, sample_rate
-
-        except Exception as e:
-            logger.error(f"Generation failed: {e}")
-            raise
-
-    def _get_device(self) -> str:
-        """Get the best available device."""
-        if torch.cuda.is_available():
-            return "cuda"
-        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            return "mps"
-        return "cpu"
+        return audio, sample_rate
 
 
-# ============================================================================
+# =============================================================================
+# Global State
+# =============================================================================
+
+_config = SFXServiceConfig()
+_sfx_manager: Optional[AudioLDMManager] = None
+
+
+def get_sfx_manager() -> AudioLDMManager:
+    """Get or create the AudioLDM manager singleton."""
+    global _sfx_manager
+    if _sfx_manager is None:
+        _sfx_manager = AudioLDMManager(_config)
+    return _sfx_manager
+
+
+# =============================================================================
 # FastAPI Application
-# ============================================================================
+# =============================================================================
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan manager."""
+    logger.info("SFX Service starting up...")
+    yield
+    logger.info("SFX Service shutting down...")
+    global _sfx_manager
+    if _sfx_manager:
+        _sfx_manager.unload()
+
 
 app = FastAPI(
     title="Volsung SFX Service",
     description="Standalone sound effects generation service using AudioLDM2",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
-# Global generator instance
-sfx_generator: Optional[AudioLDMGenerator] = None
 
-
-def get_generator() -> AudioLDMGenerator:
-    """Get or create the SFX generator."""
-    global sfx_generator
-    if sfx_generator is None:
-        sfx_generator = AudioLDMGenerator(model_size="base")
-    return sfx_generator
-
-
-def audio_to_base64(audio: np.ndarray, sample_rate: int) -> str:
-    """Convert audio array to base64-encoded WAV."""
-    buffer = BytesIO()
-    sf.write(buffer, audio, sample_rate, format="WAV")
-    buffer.seek(0)
-    return base64.b64encode(buffer.read()).decode()
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize service on startup."""
-    logger.info("=" * 60)
-    logger.info("Volsung SFX Service")
-    logger.info("=" * 60)
-    logger.info("Using AudioLDM2 via diffusers")
-    logger.info("Model will load on first generation request")
-    logger.info("")
-    logger.info("Endpoints:")
-    logger.info("  GET  /health        - Health check")
-    logger.info("  POST /sfx/generate  - Generate sound effects")
-    logger.info("=" * 60)
+# =============================================================================
+# Endpoints
+# =============================================================================
 
 
 @app.get("/health", response_model=HealthResponse)
-async def health():
+async def health_check() -> dict:
     """Check service health status."""
-    generator = get_generator()
-    return HealthResponse(
-        status="healthy",
-        model_loaded=generator.model is not None,
-        model_name=generator.model_name,
-        device=generator.device or "not_loaded",
+    model_status = {
+        "available": True,
+        "loaded": False,
+        "device": None,
+    }
+
+    try:
+        from diffusers import AudioLDM2Pipeline
+
+        model_status["available"] = True
+        if _sfx_manager is not None:
+            model_status["loaded"] = _sfx_manager.is_loaded
+            model_status["device"] = (
+                _sfx_manager.device if _sfx_manager.is_loaded else None
+            )
+    except ImportError:
+        model_status["available"] = False
+
+    overall_status = "healthy" if model_status["available"] else "unavailable"
+
+    return {
+        "status": overall_status,
+        "model": model_status,
+    }
+
+
+@app.post("/load", response_model=LoadResponse)
+async def load_model(request: LoadRequest = None) -> LoadResponse:
+    """Load the AudioLDM2 model.
+
+    Args:
+        request: Optional device override
+
+    Returns:
+        LoadResponse with status and device info
+    """
+    manager = get_sfx_manager()
+    device = request.device if request else None
+
+    try:
+        result = manager.load(device)
+        return LoadResponse(
+            status=result["status"],
+            model="AudioLDM2-Base",
+            device=result["device"],
+            message=result["message"],
+        )
+    except Exception as e:
+        logger.error(f"Failed to load model: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Failed to load model: {str(e)}",
+        )
+
+
+@app.post("/unload", response_model=UnloadResponse)
+async def unload_model() -> UnloadResponse:
+    """Unload the AudioLDM2 model and free resources.
+
+    Returns:
+        UnloadResponse with status
+    """
+    manager = get_sfx_manager()
+    result = manager.unload()
+
+    return UnloadResponse(
+        status=result["status"], model="AudioLDM2-Base", message=result["message"]
     )
 
 
-@app.post("/sfx/generate", response_model=SFXGenerateResponse)
-async def sfx_generate(req: SFXGenerateRequest):
-    """
-    Generate sound effects from text description.
+@app.post("/generate", response_model=GenerateResponse)
+async def generate(request: GenerateRequest) -> GenerateResponse:
+    """Generate sound effects from text description.
 
-    Creates sound effects up to 10 seconds from natural language description.
-    Uses AudioLDM2 diffusion model via diffusers library.
+    Args:
+        request: SFX generation request with description and parameters
 
-    Example:
-        ```json
-        {
-            "description": "Thunder rumbling in the distance",
-            "duration": 5.0,
-            "category": "nature",
-            "num_inference_steps": 50,
-            "guidance_scale": 3.5
-        }
-        ```
+    Returns:
+        GenerateResponse with base64-encoded audio and metadata
     """
     # Validate duration
-    if req.duration > 10.0:
+    if request.duration > 10.0:
         raise HTTPException(status_code=400, detail="Duration must be <= 10 seconds")
-    if req.duration <= 0:
+    if request.duration <= 0:
         raise HTTPException(status_code=400, detail="Duration must be positive")
 
-    generator = get_generator()
-
-    # Lazy load model on first request
-    if generator.model is None:
-        try:
-            generator.load()
-        except Exception as e:
-            logger.error(f"Failed to load model: {e}")
-            raise HTTPException(
-                status_code=503, detail=f"Failed to load SFX model: {str(e)}"
-            )
+    manager = get_sfx_manager()
 
     try:
         logger.info(
-            f"[SFX_GENERATE] Request: description='{req.description[:50]}...' "
-            f"duration={req.duration}s category={req.category}"
+            f"[SFX_GENERATE] Request: description='{request.description[:50]}...' "
+            f"duration={request.duration}s category={request.category}"
         )
         start_time = time.time()
 
         # Generate sound effect
-        audio, sample_rate = generator.generate(
-            prompt=req.description,
-            duration=req.duration,
-            num_inference_steps=req.num_inference_steps,
-            guidance_scale=req.guidance_scale,
+        audio, sample_rate = manager.generate(
+            prompt=request.description,
+            duration=request.duration,
+            num_inference_steps=request.num_inference_steps,
+            guidance_scale=request.guidance_scale,
         )
 
         elapsed_ms = (time.time() - start_time) * 1000
@@ -393,23 +463,26 @@ async def sfx_generate(req: SFXGenerateRequest):
         )
 
         # Convert to base64
-        audio_base64 = audio_to_base64(audio, sample_rate)
-        audio_size_kb = len(audio_base64) * 3 // 4 // 1024
+        buffer = BytesIO()
+        sf.write(buffer, audio, sample_rate, format="WAV")
+        buffer.seek(0)
+        audio_b64 = base64.b64encode(buffer.read()).decode()
+        audio_size_kb = len(audio_b64) * 3 // 4 // 1024
         logger.info(f"[SFX_GENERATE] Response: audio_size={audio_size_kb}KB")
 
         # Build metadata
         metadata = SFXMetadata(
             duration=duration_seconds,
             sample_rate=sample_rate,
-            category=req.category,
+            category=request.category,
             generation_time_ms=elapsed_ms,
-            model_used=generator.model_id,
-            num_inference_steps=req.num_inference_steps,
-            guidance_scale=req.guidance_scale,
+            model_used="cvssp/audioldm2",
+            num_inference_steps=request.num_inference_steps,
+            guidance_scale=request.guidance_scale,
         )
 
-        return SFXGenerateResponse(
-            audio=audio_base64,
+        return GenerateResponse(
+            audio=audio_b64,
             sample_rate=sample_rate,
             metadata=metadata,
         )
@@ -418,20 +491,24 @@ async def sfx_generate(req: SFXGenerateRequest):
         raise
     except Exception as e:
         logger.error(f"[SFX_GENERATE] Failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"SFX generation failed: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"SFX generation failed: {str(e)}",
+        )
 
 
-# ============================================================================
-# Main Entry Point
-# ============================================================================
+# =============================================================================
+# Entry Point
+# =============================================================================
 
 if __name__ == "__main__":
     import uvicorn
 
+    config = SFXServiceConfig()
+    logger.info(f"Starting SFX Service on {config.host}:{config.port}")
     uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=8003,
+        "volsung.services.sfx_service:app",
+        host=config.host,
+        port=config.port,
         log_level="info",
-        access_log=True,
     )

@@ -33,9 +33,11 @@ logger = logging.getLogger(__name__)
 
 # Service port mappings
 DEFAULT_SERVICE_PORTS = {
-    "tts": 8001,
-    "music": 8002,
-    "sfx": 8003,
+    "qwen-voice": 8001,
+    "qwen-base": 8002,
+    "styletts": 8003,
+    "music": 8004,
+    "sfx": 8005,
 }
 
 DEFAULT_TIMEOUT = 60.0  # seconds for long-running ML inference
@@ -393,23 +395,31 @@ class ServiceRegistry:
 
     def __init__(
         self,
-        tts_url: str = "http://localhost:8001",
-        music_url: str = "http://localhost:8002",
-        sfx_url: str = "http://localhost:8003",
+        qwen_voice_url: str = "http://localhost:8001",
+        qwen_base_url: str = "http://localhost:8002",
+        styletts_url: str = "http://localhost:8003",
+        music_url: str = "http://localhost:8004",
+        sfx_url: str = "http://localhost:8005",
     ):
         """Initialize the service registry.
 
         Args:
-            tts_url: TTS service URL
+            qwen_voice_url: Qwen-Voice service URL
+            qwen_base_url: Qwen-Base service URL
+            styletts_url: StyleTTS service URL
             music_url: Music service URL
             sfx_url: SFX service URL
         """
-        self.tts = ServiceClient(tts_url)
+        self.qwen_voice = ServiceClient(qwen_voice_url)
+        self.qwen_base = ServiceClient(qwen_base_url)
+        self.styletts = ServiceClient(styletts_url)
         self.music = ServiceClient(music_url)
         self.sfx = ServiceClient(sfx_url)
 
         self._clients: Dict[str, ServiceClient] = {
-            "tts": self.tts,
+            "qwen-voice": self.qwen_voice,
+            "qwen-base": self.qwen_base,
+            "styletts": self.styletts,
             "music": self.music,
             "sfx": self.sfx,
         }

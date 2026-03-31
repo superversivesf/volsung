@@ -1,5 +1,6 @@
-# Volsung SFX Service Dockerfile
-# Standalone sound effects generation service using AudioLDM2
+# Volsung Qwen Base Service Dockerfile
+# Standalone Qwen Base TTS service
+# Uses Qwen3-TTS Base model for text-to-speech
 
 FROM python:3.10-slim
 
@@ -13,22 +14,21 @@ WORKDIR /app
 
 # Install system dependencies
 # - ffmpeg: Audio processing
-# - build-essential: Required for compiling some Python packages
+# - libsndfile1: Sound file I/O
+# - git: For potential git-based dependencies
 # - curl: For health checks
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
-    build-essential \
-    pkg-config \
+    libsndfile1 \
+    libsndfile1-dev \
+    git \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install torch first (specific version for stability)
-RUN pip install --no-cache-dir torch==2.1.0 torchaudio==2.1.0
+# Copy requirements first for better layer caching
+COPY requirements/services/qwen-base.txt /app/requirements.txt
 
-# Copy requirements
-COPY requirements/services/sfx.txt /app/requirements.txt
-
-# Install remaining Python dependencies
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Create directories for models and outputs
@@ -37,22 +37,23 @@ RUN mkdir -p /app/models /app/outputs
 # Copy the volsung package
 COPY volsung/__init__.py /app/volsung/__init__.py
 COPY volsung/services/__init__.py /app/volsung/services/__init__.py
-COPY volsung/services/sfx_service.py /app/volsung/services/sfx_service.py
+COPY volsung/services/qwen_base_service.py /app/volsung/services/qwen_base_service.py
 
 # Set Python path
 ENV PYTHONPATH=/app
 
 # Service configuration
-ENV SFX_SERVICE_HOST=0.0.0.0
-ENV SFX_SERVICE_PORT=8005
-ENV SFX_MODEL_CACHE=/app/models
+ENV QWEN_BASE_SERVICE_HOST=0.0.0.0
+ENV QWEN_BASE_SERVICE_PORT=8002
+ENV QWEN_BASE_MODEL_NAME=Qwen/Qwen3-TTS-12Hz-1.7B-Base
+ENV QWEN_BASE_MODEL_CACHE=/app/models
 
 # Expose port
-EXPOSE 8005
+EXPOSE 8002
 
 # Health check using curl
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
-    CMD curl -f http://localhost:8005/health || exit 1
+    CMD curl -f http://localhost:8002/health || exit 1
 
-# Run the SFX service
-CMD ["python", "-m", "uvicorn", "volsung.services.sfx_service:app", "--host", "0.0.0.0", "--port", "8005"]
+# Run the Qwen Base service
+CMD ["python", "-m", "uvicorn", "volsung.services.qwen_base_service:app", "--host", "0.0.0.0", "--port", "8002"]

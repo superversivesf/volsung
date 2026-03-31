@@ -1,32 +1,27 @@
-"""Standalone Music Service using FastAPI and MusicGen.
+"""MusicGen Service for Volsung.
 
-A standalone microservice for music generation using Facebook's MusicGen model
-via audiocraft. Runs on port 8002 and provides a simple HTTP API for
-generating music from text descriptions.
-
-This service is completely independent from the main Volsung server and
-only imports music-related modules.
+A standalone FastAPI service that provides MusicGen music generation endpoints.
+Runs on port 8004 and handles music generation from text descriptions.
 
 Example:
-    Start the service:
-        ./scripts/start-music.sh
-    
-    Generate music:
-        curl -X POST http://localhost:8002/music/generate \\
-            -H "Content-Type: application/json" \\
-            -d '{"description": "Peaceful acoustic guitar", "duration": 10}'
+    # Start the service
+    python -m volsung.services.music_service
 
-Attributes:
-    app: FastAPI application instance
-    generator: MusicGen generator instance (lazy-loaded)
+    # Or using uvicorn directly
+    uvicorn volsung.services.music_service:app --host 0.0.0.0 --port 8004
 
-References:
-    - https://github.com/facebookresearch/audiocraft
+Environment Variables:
+    MUSIC_SERVICE_HOST: Server bind address (default: 0.0.0.0)
+    MUSIC_SERVICE_PORT: Server port (default: 8004)
+    MUSIC_DEVICE: Device override (default: auto-detected)
 """
+
+from __future__ import annotations
 
 import base64
 import io
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional, Tuple
@@ -45,30 +40,31 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Module-level state
-_generator: Optional[Any] = None
-_device: Optional[str] = None
-_dtype: Optional[str] = None
+# =============================================================================
+# Configuration
+# =============================================================================
 
 
-# ============================================================================
+class MusicServiceConfig(BaseModel):
+    """Music service configuration."""
+
+    host: str = Field(
+        default_factory=lambda: os.getenv("MUSIC_SERVICE_HOST", "0.0.0.0")
+    )
+    port: int = Field(
+        default_factory=lambda: int(os.getenv("MUSIC_SERVICE_PORT", "8004"))
+    )
+    model_id: str = Field(default="facebook/musicgen-small")
+    device: Optional[str] = Field(default_factory=lambda: os.getenv("MUSIC_DEVICE"))
+
+
+# =============================================================================
 # Pydantic Schemas
-# ============================================================================
+# =============================================================================
 
 
-class MusicGenerateRequest(BaseModel):
-    """Request for generating music from text description.
-
-    Attributes:
-        description: Natural language description of desired music
-        duration: Target duration in seconds (1-30, default: 10)
-        genre: Optional genre tag (e.g., "acoustic", "electronic")
-        mood: Optional mood descriptor (e.g., "upbeat", "calm")
-        tempo: Optional tempo hint ("slow", "medium", "fast")
-        top_k: Top-k sampling parameter (higher = more diverse)
-        top_p: Nucleus sampling parameter (0.0 = disabled)
-        temperature: Randomness/temperature parameter
-    """
+class GenerateRequest(BaseModel):
+    """Request for generating music from text description."""
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -157,7 +153,7 @@ class MusicMetadata(BaseModel):
     )
 
 
-class MusicGenerateResponse(BaseModel):
+class GenerateResponse(BaseModel):
     """Response containing generated music and metadata."""
 
     audio: str = Field(..., description="Base64-encoded WAV audio data")
@@ -165,46 +161,200 @@ class MusicGenerateResponse(BaseModel):
     metadata: MusicMetadata = Field(..., description="Generation metadata")
 
 
+class LoadRequest(BaseModel):
+    """Request to load the model."""
+
+    device: Optional[str] = Field(
+        default=None,
+        description="Device to load on (cuda, cpu, mps). Auto-detected if not specified.",
+    )
+
+
+class LoadResponse(BaseModel):
+    """Response from load operation."""
+
+    status: str = Field(..., description="Status: loaded or already_loaded")
+    model: str = Field(..., description="Model identifier")
+    device: str = Field(..., description="Device model is loaded on")
+    message: str = Field(..., description="Human-readable status message")
+
+
+class UnloadResponse(BaseModel):
+    """Response from unload operation."""
+
+    status: str = Field(..., description="Status: unloaded or not_loaded")
+    model: str = Field(..., description="Model identifier")
+    message: str = Field(..., description="Human-readable status message")
+
+
 class HealthResponse(BaseModel):
     """Health check response."""
 
-    status: str = Field(..., description="Service status")
-    model: str = Field(..., description="Model name")
-    loaded: bool = Field(..., description="Whether model is loaded")
-    device: Optional[str] = Field(None, description="Device model is on")
+    status: str = Field(..., description="Overall service status")
+    model: dict = Field(default_factory=dict, description="Model status")
 
 
-class InfoResponse(BaseModel):
-    """Service information response."""
-
-    status: str = Field(..., description="Service status")
-    model: str = Field(..., description="Model name")
-    model_id: str = Field(..., description="Model identifier")
-    loaded: bool = Field(..., description="Whether model is loaded")
-    device: Optional[str] = Field(None, description="Device model is on")
-    dtype: Optional[str] = Field(None, description="Data type used")
-    version: str = Field(default="1.0.0", description="Service version")
+# =============================================================================
+# Model Manager Class
+# =============================================================================
 
 
-# ============================================================================
-# MusicGen Integration
-# ============================================================================
+class MusicGenManager:
+    """Manager for MusicGen model."""
+
+    def __init__(self, config: MusicServiceConfig):
+        self.config = config
+        self._generator: Optional[Any] = None
+        self._device = self._get_device()
+        self._is_loaded = False
+
+    def _get_device(self) -> str:
+        """Get the best available device."""
+        if self.config.device:
+            return self.config.device
+        if torch.cuda.is_available():
+            return "cuda:0"
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
+
+    def _get_dtype(self) -> str:
+        """Get the optimal dtype for the device."""
+        if self._device.startswith("cuda"):
+            return "bfloat16"
+        return "float32"
+
+    def load(self, device: Optional[str] = None) -> dict:
+        """Load the MusicGen model."""
+        if self._is_loaded:
+            return {
+                "status": "already_loaded",
+                "device": self._device,
+                "message": f"Model already loaded on {self._device}",
+            }
+
+        try:
+            from audiocraft.models import MusicGen
+        except ImportError:
+            raise ImportError(
+                "audiocraft is required for MusicGen. Install with: pip install audiocraft"
+            )
+
+        if device:
+            self._device = device
+
+        dtype = self._get_dtype()
+        logger.info(f"Loading MusicGen on {self._device} with {dtype}...")
+
+        try:
+            self._generator = MusicGen.get_pretrained("musicgen-small")
+            self._generator.set_generation_params(
+                duration=10.0,
+                top_k=250,
+                top_p=0.0,
+                temperature=1.0,
+                use_sampling=True,
+            )
+            self._is_loaded = True
+            logger.info("MusicGen model loaded successfully")
+
+            return {
+                "status": "loaded",
+                "device": self._device,
+                "message": f"Model loaded successfully on {self._device}",
+            }
+        except Exception as e:
+            logger.error(f"Failed to load MusicGen: {e}")
+            raise RuntimeError(f"Failed to load MusicGen: {e}")
+
+    def unload(self) -> dict:
+        """Unload the model and free resources."""
+        if not self._is_loaded:
+            return {"status": "not_loaded", "message": "Model was not loaded"}
+
+        logger.info("Unloading MusicGen model...")
+        self._generator = None
+        self._is_loaded = False
+
+        import gc
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+        logger.info("MusicGen model unloaded")
+
+        return {"status": "unloaded", "message": "Model unloaded successfully"}
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._is_loaded
+
+    @property
+    def device(self) -> str:
+        return self._device
+
+    def generate(
+        self,
+        prompt: str,
+        duration: float,
+        top_k: int = 250,
+        top_p: float = 0.0,
+        temperature: float = 1.0,
+    ) -> Tuple[np.ndarray, int]:
+        """Generate music from text prompt."""
+        if not self._is_loaded:
+            self.load()
+
+        if self._generator is None:
+            raise RuntimeError("MusicGen generator not loaded")
+
+        logger.info(f"[MusicGen] Generating {duration}s: '{prompt[:50]}...'")
+
+        # Set generation parameters
+        self._generator.set_generation_params(
+            duration=duration,
+            top_k=top_k,
+            top_p=top_p,
+            temperature=temperature,
+            use_sampling=True,
+        )
+
+        # Generate
+        with torch.no_grad():
+            output = self._generator.generate(
+                descriptions=[prompt],
+                progress=False,
+            )
+
+        # Convert to numpy array
+        audio = output[0, 0].cpu().numpy()
+        sample_rate = 32000
+
+        # Ensure mono
+        if audio.ndim > 1:
+            audio = audio.mean(axis=0)
+
+        logger.info(f"[MusicGen] Generated: {len(audio)} samples @ {sample_rate}Hz")
+
+        return audio, sample_rate
 
 
-def _get_device() -> str:
-    """Determine the best device for model inference."""
-    if torch.cuda.is_available():
-        return "cuda:0"
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
+# =============================================================================
+# Global State
+# =============================================================================
+
+_config = MusicServiceConfig()
+_music_manager: Optional[MusicGenManager] = None
 
 
-def _get_dtype(device: str) -> str:
-    """Determine the best dtype for the device."""
-    if device.startswith("cuda"):
-        return "bfloat16"
-    return "float32"
+def get_music_manager() -> MusicGenManager:
+    """Get or create the MusicGen manager singleton."""
+    global _music_manager
+    if _music_manager is None:
+        _music_manager = MusicGenManager(_config)
+    return _music_manager
 
 
 def _build_prompt(
@@ -226,135 +376,20 @@ def _build_prompt(
     return ", ".join(parts)
 
 
-def load_model() -> None:
-    """Load the MusicGen model.
-
-    Called automatically on first generation request.
-    """
-    global _generator, _device, _dtype
-
-    if _generator is not None:
-        return
-
-    try:
-        from audiocraft.models import MusicGen
-    except ImportError:
-        raise ImportError(
-            "audiocraft is required for MusicGen. Install with: pip install audiocraft"
-        )
-
-    _device = _get_device()
-    _dtype = _get_dtype(_device)
-
-    logger.info(f"Loading MusicGen model (facebook/musicgen-small)...")
-    logger.info(f"Device: {_device}, Dtype: {_dtype}")
-
-    try:
-        _generator = MusicGen.get_pretrained("musicgen-small")
-        _generator.set_generation_params(
-            duration=10.0,
-            top_k=250,
-            top_p=0.0,
-            temperature=1.0,
-            use_sampling=True,
-        )
-        logger.info("MusicGen model loaded successfully")
-    except Exception as e:
-        logger.error(f"Failed to load MusicGen: {e}")
-        raise
-
-
-def unload_model() -> None:
-    """Unload the model and free resources."""
-    global _generator, _device, _dtype
-
-    if _generator is not None:
-        logger.info("Unloading MusicGen model...")
-        del _generator
-        _generator = None
-
-        # Clear GPU cache
-        import gc
-
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-
-        _device = None
-        _dtype = None
-        logger.info("MusicGen model unloaded")
-
-
-def generate_music(
-    prompt: str,
-    duration: float,
-    top_k: int = 250,
-    top_p: float = 0.0,
-    temperature: float = 1.0,
-) -> Tuple[np.ndarray, int]:
-    """Generate music from text prompt.
-
-    Args:
-        prompt: Text description of desired music
-        duration: Target duration in seconds
-        top_k: Top-k sampling parameter
-        top_p: Nucleus sampling parameter
-        temperature: Randomness/temperature parameter
-
-    Returns:
-        Tuple of (audio_array, sample_rate)
-    """
-    global _generator
-
-    if _generator is None:
-        load_model()
-
-    logger.info(f"[MusicGen] Generating {duration}s: '{prompt[:50]}...'")
-
-    # Set generation parameters
-    _generator.set_generation_params(
-        duration=duration,
-        top_k=top_k,
-        top_p=top_p,
-        temperature=temperature,
-        use_sampling=True,
-    )
-
-    # Generate
-    with torch.no_grad():
-        output = _generator.generate(
-            descriptions=[prompt],
-            progress=False,
-        )
-
-    # Convert to numpy array
-    audio = output[0, 0].cpu().numpy()
-    sample_rate = 32000
-
-    # Ensure mono
-    if audio.ndim > 1:
-        audio = audio.mean(axis=0)
-
-    logger.info(f"[MusicGen] Generated: {len(audio)} samples @ {sample_rate}Hz")
-
-    return audio, sample_rate
-
-
-# ============================================================================
+# =============================================================================
 # FastAPI Application
-# ============================================================================
+# =============================================================================
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager."""
     logger.info("Music Service starting up...")
-    # Pre-load model on startup (optional - can also lazy-load)
-    # load_model()  # Uncomment to load at startup
     yield
     logger.info("Music Service shutting down...")
-    unload_model()
+    global _music_manager
+    if _music_manager:
+        _music_manager.unload()
 
 
 app = FastAPI(
@@ -374,71 +409,97 @@ app.add_middleware(
 )
 
 
+# =============================================================================
+# Endpoints
+# =============================================================================
+
+
 @app.get("/health", response_model=HealthResponse)
-async def health_check() -> HealthResponse:
-    """Health check endpoint.
+async def health_check() -> dict:
+    """Check service health status."""
+    model_status = {
+        "available": True,
+        "loaded": False,
+        "device": None,
+    }
+
+    try:
+        from audiocraft.models import MusicGen
+
+        model_status["available"] = True
+        if _music_manager is not None:
+            model_status["loaded"] = _music_manager.is_loaded
+            model_status["device"] = (
+                _music_manager.device if _music_manager.is_loaded else None
+            )
+    except ImportError:
+        model_status["available"] = False
+
+    overall_status = "healthy" if model_status["available"] else "unavailable"
+
+    return {
+        "status": overall_status,
+        "model": model_status,
+    }
+
+
+@app.post("/load", response_model=LoadResponse)
+async def load_model(request: LoadRequest = None) -> LoadResponse:
+    """Load the MusicGen model.
+
+    Args:
+        request: Optional device override
 
     Returns:
-        HealthResponse with service status
+        LoadResponse with status and device info
     """
-    return HealthResponse(
-        status="healthy",
-        model="MusicGen Small",
-        loaded=_generator is not None,
-        device=_device,
+    manager = get_music_manager()
+    device = request.device if request else None
+
+    try:
+        result = manager.load(device)
+        return LoadResponse(
+            status=result["status"],
+            model="MusicGen-Small",
+            device=result["device"],
+            message=result["message"],
+        )
+    except Exception as e:
+        logger.error(f"Failed to load model: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Failed to load model: {str(e)}",
+        )
+
+
+@app.post("/unload", response_model=UnloadResponse)
+async def unload_model() -> UnloadResponse:
+    """Unload the MusicGen model and free resources.
+
+    Returns:
+        UnloadResponse with status
+    """
+    manager = get_music_manager()
+    result = manager.unload()
+
+    return UnloadResponse(
+        status=result["status"], model="MusicGen-Small", message=result["message"]
     )
 
 
-@app.get("/info", response_model=InfoResponse)
-async def info() -> InfoResponse:
-    """Service information endpoint.
-
-    Returns:
-        InfoResponse with service metadata
-    """
-    return InfoResponse(
-        status="ready",
-        model="MusicGen Small",
-        model_id="musicgen-small",
-        loaded=_generator is not None,
-        device=_device,
-        dtype=_dtype,
-    )
-
-
-@app.post("/music/generate", response_model=MusicGenerateResponse)
-async def music_generate(request: MusicGenerateRequest) -> MusicGenerateResponse:
+@app.post("/generate", response_model=GenerateResponse)
+async def generate(request: GenerateRequest) -> GenerateResponse:
     """Generate music from text description.
-
-    Creates music up to 30 seconds from a natural language description.
-    Useful for background music, ambience, etc.
 
     Args:
         request: Music generation request with description and parameters
 
     Returns:
-        MusicGenerateResponse with base64-encoded audio and metadata
-
-    Raises:
-        HTTPException: If generation fails
-
-    Example:
-        ```python
-        import requests
-
-        response = requests.post(
-            "http://localhost:8002/music/generate",
-            json={
-                "description": "Peaceful acoustic guitar",
-                "duration": 10.0,
-            }
-        )
-        result = response.json()
-        # result["audio"] contains base64-encoded WAV
-        ```
+        GenerateResponse with base64-encoded audio and metadata
     """
     try:
         start_time = time.time()
+        manager = get_music_manager()
 
         # Build enhanced prompt
         enhanced_prompt = _build_prompt(
@@ -449,7 +510,7 @@ async def music_generate(request: MusicGenerateRequest) -> MusicGenerateResponse
         )
 
         # Generate music
-        audio_array, sample_rate = generate_music(
+        audio_array, sample_rate = manager.generate(
             prompt=enhanced_prompt,
             duration=request.duration,
             top_k=request.top_k,
@@ -488,7 +549,7 @@ async def music_generate(request: MusicGenerateRequest) -> MusicGenerateResponse
             },
         )
 
-        return MusicGenerateResponse(
+        return GenerateResponse(
             audio=audio_b64,
             sample_rate=sample_rate,
             metadata=metadata,
@@ -508,36 +569,19 @@ async def music_generate(request: MusicGenerateRequest) -> MusicGenerateResponse
         )
 
 
-@app.post("/music/unload")
-async def music_unload() -> Dict[str, Any]:
-    """Force unload the music model.
-
-    Frees GPU memory by unloading the model immediately.
-    Model will be reloaded on next generation request.
-
-    Returns:
-        Dictionary with unload status
-    """
-    was_loaded = _generator is not None
-    unload_model()
-
-    return {
-        "unloaded": was_loaded,
-        "status": "unloaded" if was_loaded else "already_unloaded",
-    }
-
-
-# ============================================================================
+# =============================================================================
 # Entry Point
-# ============================================================================
+# =============================================================================
 
 if __name__ == "__main__":
     import uvicorn
 
+    config = MusicServiceConfig()
+    logger.info(f"Starting Music Service on {config.host}:{config.port}")
     uvicorn.run(
         "volsung.services.music_service:app",
-        host="0.0.0.0",
-        port=8002,
+        host=config.host,
+        port=config.port,
         log_level="info",
         reload=False,
     )

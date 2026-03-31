@@ -1,17 +1,26 @@
 """
-Volsung Coordinator/Gateway - Service routing and health aggregation.
+Volsung Coordinator/Gateway - Service routing with smart model loading.
 
 This is the main entry point for the Volsung audio generation system.
-It acts as a lightweight gateway that routes requests to microservices:
-- /voice/* → TTS service (port 8001)
-- /music/* → Music service (port 8002)
-- /sfx/* → SFX service (port 8003)
+It acts as a lightweight gateway that routes requests to microservices
+and manages smart model loading (only one model loaded at a time).
 
-The coordinator provides:
-- Request routing and forwarding
-- Health aggregation from all services
-- Service discovery and availability checking
-- Helpful error messages when services are unavailable
+Service Registry:
+- /voice/design → qwen-voice:8001
+- /voice/synthesize → qwen-base:8002
+- /voice/styletts → styletts:8003
+- /music/generate → music:8004
+- /sfx/generate → sfx:8005
+
+Smart Loading:
+- Tracks currently loaded service/model
+- Unloads current before loading new (resource management)
+- Fast path when target already loaded
+
+Admin Endpoints:
+- POST /admin/load - Force load specific service
+- POST /admin/unload - Force unload
+- GET /admin/status - Show loaded service
 
 Example:
     # Start all services
@@ -22,12 +31,15 @@ Example:
 
     # Then use the coordinator
     curl http://localhost:8000/health
-    curl -X POST http://localhost:8000/voice/design -d '{"text": "Hello", "instruct": "warm voice"}'
+    curl -X POST http://localhost:8000/voice/design -d '{"text": "Hello"}'
+    curl http://localhost:8000/admin/status
 
 Environment Variables:
-    TTS_SERVICE_URL: TTS service URL (default: http://localhost:8001)
-    MUSIC_SERVICE_URL: Music service URL (default: http://localhost:8002)
-    SFX_SERVICE_URL: SFX service URL (default: http://localhost:8003)
+    QWEN_VOICE_SERVICE_URL: Qwen voice service (default: http://localhost:8001)
+    QWEN_BASE_SERVICE_URL: Qwen base service (default: http://localhost:8002)
+    STYLETTS_SERVICE_URL: StyleTTS service (default: http://localhost:8003)
+    MUSIC_SERVICE_URL: Music service (default: http://localhost:8004)
+    SFX_SERVICE_URL: SFX service (default: http://localhost:8005)
     COORDINATOR_HOST: Coordinator bind address (default: 0.0.0.0)
     COORDINATOR_PORT: Coordinator port (default: 8000)
 """
@@ -37,20 +49,14 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional, Set
+from enum import Enum
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
-from volsung.services.client import (
-    ServiceClient,
-    ServiceInfo,
-    ServiceRegistry,
-    discover_services,
-    get_service_registry,
-    close_service_registry,
-)
+from volsung.services.client import ServiceClient, ServiceInfo, discover_services
 
 # Configure logging
 logging.basicConfig(
@@ -64,11 +70,380 @@ logger = logging.getLogger(__name__)
 # Configuration
 # ============================================================================
 
-TTS_SERVICE_URL = os.getenv("TTS_SERVICE_URL", "http://localhost:8001")
-MUSIC_SERVICE_URL = os.getenv("MUSIC_SERVICE_URL", "http://localhost:8002")
-SFX_SERVICE_URL = os.getenv("SFX_SERVICE_URL", "http://localhost:8003")
+QWEN_VOICE_SERVICE_URL = os.getenv("QWEN_VOICE_SERVICE_URL", "http://localhost:8001")
+QWEN_BASE_SERVICE_URL = os.getenv("QWEN_BASE_SERVICE_URL", "http://localhost:8002")
+STYLETTS_SERVICE_URL = os.getenv("STYLETTS_SERVICE_URL", "http://localhost:8003")
+MUSIC_SERVICE_URL = os.getenv("MUSIC_SERVICE_URL", "http://localhost:8004")
+SFX_SERVICE_URL = os.getenv("SFX_SERVICE_URL", "http://localhost:8005")
 COORDINATOR_HOST = os.getenv("COORDINATOR_HOST", "0.0.0.0")
 COORDINATOR_PORT = int(os.getenv("COORDINATOR_PORT", "8000"))
+
+# ============================================================================
+# Service Registry & Smart Loading
+# ============================================================================
+
+
+class ServiceName(str, Enum):
+    """Service names for the registry."""
+
+    QWEN_VOICE = "qwen-voice"
+    QWEN_BASE = "qwen-base"
+    STYLETTS = "styletts"
+    MUSIC = "music"
+    SFX = "sfx"
+
+
+# Maps endpoints to service names
+ENDPOINT_SERVICE_MAP = {
+    # Voice services
+    "/voice/design": ServiceName.QWEN_VOICE,
+    "/voice/synthesize": ServiceName.QWEN_BASE,
+    "/voice/styletts": ServiceName.STYLETTS,
+    "/voice/styletts/design": ServiceName.STYLETTS,
+    # Music services
+    "/music/generate": ServiceName.MUSIC,
+    # SFX services
+    "/sfx/generate": ServiceName.SFX,
+    "/sfx/layer": ServiceName.SFX,
+}
+
+# Service port mappings
+SERVICE_PORTS = {
+    ServiceName.QWEN_VOICE: 8001,
+    ServiceName.QWEN_BASE: 8002,
+    ServiceName.STYLETTS: 8003,
+    ServiceName.MUSIC: 8004,
+    ServiceName.SFX: 8005,
+}
+
+
+class SmartServiceRegistry:
+    """Service registry with smart model loading.
+
+    Only one service's model is kept loaded in memory at a time.
+    When a request comes in for a different service:
+    1. Unload the current service's model
+    2. Load the target service's model
+    3. Update currently_loaded tracking
+    """
+
+    def __init__(
+        self,
+        qwen_voice_url: str = QWEN_VOICE_SERVICE_URL,
+        qwen_base_url: str = QWEN_BASE_SERVICE_URL,
+        styletts_url: str = STYLETTS_SERVICE_URL,
+        music_url: str = MUSIC_SERVICE_URL,
+        sfx_url: str = SFX_SERVICE_URL,
+    ):
+        """Initialize the smart service registry.
+
+        Args:
+            qwen_voice_url: Qwen voice service URL
+            qwen_base_url: Qwen base service URL
+            styletts_url: StyleTTS service URL
+            music_url: Music service URL
+            sfx_url: SFX service URL
+        """
+        self._clients: Dict[ServiceName, ServiceClient] = {
+            ServiceName.QWEN_VOICE: ServiceClient(qwen_voice_url),
+            ServiceName.QWEN_BASE: ServiceClient(qwen_base_url),
+            ServiceName.STYLETTS: ServiceClient(styletts_url),
+            ServiceName.MUSIC: ServiceClient(music_url),
+            ServiceName.SFX: ServiceClient(sfx_url),
+        }
+
+        self._service_urls: Dict[ServiceName, str] = {
+            ServiceName.QWEN_VOICE: qwen_voice_url,
+            ServiceName.QWEN_BASE: qwen_base_url,
+            ServiceName.STYLETTS: styletts_url,
+            ServiceName.MUSIC: music_url,
+            ServiceName.SFX: sfx_url,
+        }
+
+        # Track which service currently has model loaded
+        self._currently_loaded: Optional[ServiceName] = None
+
+        # Lock for concurrent access
+        self._loading = False
+
+    @property
+    def currently_loaded(self) -> Optional[ServiceName]:
+        """Get the currently loaded service name."""
+        return self._currently_loaded
+
+    def get_client(self, service_name: ServiceName) -> ServiceClient:
+        """Get client for a specific service.
+
+        Args:
+            service_name: Service name from ServiceName enum
+
+        Returns:
+            ServiceClient instance
+
+        Raises:
+            ValueError: If service name is unknown
+        """
+        if service_name not in self._clients:
+            raise ValueError(
+                f"Unknown service: {service_name}. "
+                f"Available: {[s.value for s in self._clients.keys()]}"
+            )
+        return self._clients[service_name]
+
+    def get_service_for_endpoint(self, endpoint: str) -> Optional[ServiceName]:
+        """Get the service name responsible for an endpoint.
+
+        Args:
+            endpoint: API endpoint path
+
+        Returns:
+            ServiceName if mapped, None otherwise
+        """
+        # Exact match first
+        if endpoint in ENDPOINT_SERVICE_MAP:
+            return ENDPOINT_SERVICE_MAP[endpoint]
+
+        # Prefix match for wildcard paths
+        for path_prefix, service in ENDPOINT_SERVICE_MAP.items():
+            if endpoint.startswith(path_prefix):
+                return service
+
+        return None
+
+    async def ensure_loaded(self, target_service: ServiceName) -> Dict[str, Any]:
+        """Ensure target service is loaded (smart loading).
+
+        If target == currently_loaded: do nothing (fast path)
+        If target != currently_loaded:
+            - Send /unload to current service
+            - Send /load to target service
+            - Update currently_loaded
+
+        Args:
+            target_service: Service that needs to be loaded
+
+        Returns:
+            Dictionary with load operation results
+        """
+        result = {
+            "target": target_service.value,
+            "previously_loaded": self._currently_loaded.value
+            if self._currently_loaded
+            else None,
+            "actions": [],
+        }
+
+        # Fast path: already loaded
+        if target_service == self._currently_loaded:
+            result["action"] = "noop"
+            result["message"] = f"{target_service.value} already loaded"
+            return result
+
+        # Need to switch services
+        actions = []
+
+        # Step 1: Unload current service (if any)
+        if self._currently_loaded is not None:
+            try:
+                current_client = self._clients[self._currently_loaded]
+                unload_response = await current_client.forward(
+                    "/unload",
+                    method="POST",
+                    skip_retry=True,
+                )
+                actions.append(
+                    {
+                        "action": "unload",
+                        "service": self._currently_loaded.value,
+                        "status": unload_response.status_code,
+                    }
+                )
+                logger.info(f"Unloaded {self._currently_loaded.value}")
+            except Exception as e:
+                logger.warning(f"Failed to unload {self._currently_loaded.value}: {e}")
+                actions.append(
+                    {
+                        "action": "unload",
+                        "service": self._currently_loaded.value,
+                        "status": "failed",
+                        "error": str(e),
+                    }
+                )
+
+        # Step 2: Load target service
+        try:
+            target_client = self._clients[target_service]
+            load_response = await target_client.forward(
+                "/load",
+                method="POST",
+                skip_retry=True,
+            )
+            actions.append(
+                {
+                    "action": "load",
+                    "service": target_service.value,
+                    "status": load_response.status_code,
+                }
+            )
+
+            if load_response.status_code == 200:
+                self._currently_loaded = target_service
+                logger.info(f"Loaded {target_service.value}")
+            else:
+                error_msg = f"Failed to load {target_service.value}: HTTP {load_response.status_code}"
+                logger.error(error_msg)
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "error": "Service load failed",
+                        "service": target_service.value,
+                        "status_code": load_response.status_code,
+                        "actions": actions,
+                    },
+                )
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            error_msg = f"Failed to load {target_service.value}: {e}"
+            logger.error(error_msg)
+            actions.append(
+                {
+                    "action": "load",
+                    "service": target_service.value,
+                    "status": "failed",
+                    "error": str(e),
+                }
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "Service load failed",
+                    "service": target_service.value,
+                    "message": str(e),
+                    "actions": actions,
+                },
+            )
+
+        result["action"] = "switched"
+        result["actions"] = actions
+        return result
+
+    async def force_load(self, service_name: ServiceName) -> Dict[str, Any]:
+        """Force load a specific service (admin operation).
+
+        Args:
+            service_name: Service to load
+
+        Returns:
+            Load operation results
+        """
+        return await self.ensure_loaded(service_name)
+
+    async def force_unload(self) -> Dict[str, Any]:
+        """Force unload currently loaded service (admin operation).
+
+        Returns:
+            Unload operation results
+        """
+        result = {
+            "previously_loaded": self._currently_loaded.value
+            if self._currently_loaded
+            else None,
+            "action": "unload",
+        }
+
+        if self._currently_loaded is None:
+            result["message"] = "No service currently loaded"
+            return result
+
+        try:
+            current_client = self._clients[self._currently_loaded]
+            response = await current_client.forward(
+                "/unload",
+                method="POST",
+                skip_retry=True,
+            )
+            result["status"] = response.status_code
+            result["service"] = self._currently_loaded.value
+
+            if response.status_code == 200:
+                logger.info(f"Force unloaded {self._currently_loaded.value}")
+                self._currently_loaded = None
+            else:
+                logger.warning(f"Unload returned {response.status_code}")
+
+        except Exception as e:
+            logger.error(f"Failed to unload {self._currently_loaded.value}: {e}")
+            result["status"] = "failed"
+            result["error"] = str(e)
+
+        return result
+
+    async def get_status(self) -> Dict[str, Any]:
+        """Get current loading status.
+
+        Returns:
+            Status information
+        """
+        return {
+            "currently_loaded": self._currently_loaded.value
+            if self._currently_loaded
+            else None,
+            "available_services": [s.value for s in self._clients.keys()],
+            "service_urls": {k.value: v for k, v in self._service_urls.items()},
+        }
+
+    async def health_check_all(self) -> Dict[str, ServiceInfo]:
+        """Check health of all registered services.
+
+        Returns:
+            Dictionary of service name -> ServiceInfo
+        """
+        results: Dict[str, ServiceInfo] = {}
+
+        for name, client in self._clients.items():
+            try:
+                results[name.value] = await client.health()
+            except Exception as e:
+                results[name.value] = ServiceInfo(
+                    name=name.value,
+                    url=client.base_url,
+                    is_healthy=False,
+                    error=str(e),
+                )
+
+        return results
+
+    async def close_all(self) -> None:
+        """Close all client connections."""
+        import asyncio
+
+        await asyncio.gather(
+            *[client.close() for client in self._clients.values()],
+            return_exceptions=True,
+        )
+
+
+# Global registry instance
+_service_registry: Optional[SmartServiceRegistry] = None
+
+
+def get_registry() -> SmartServiceRegistry:
+    """Get or create the smart service registry."""
+    global _service_registry
+    if _service_registry is None:
+        _service_registry = SmartServiceRegistry()
+    return _service_registry
+
+
+async def close_registry() -> None:
+    """Close the service registry."""
+    global _service_registry
+    if _service_registry is not None:
+        await _service_registry.close_all()
+        _service_registry = None
+
 
 # ============================================================================
 # Pydantic Schemas
@@ -91,64 +466,56 @@ class HealthResponse(BaseModel):
     )
 
 
-class PreloadRequest(BaseModel):
-    """Request for preloading models across services."""
+class AdminLoadRequest(BaseModel):
+    """Request to force load a service."""
 
-    models: List[str] = Field(
-        default_factory=lambda: ["all"],
-        description="Models to preload: 'tts', 'music', 'sfx', or 'all'",
+    service: str = Field(..., description="Service name to load")
+
+
+class AdminLoadResponse(BaseModel):
+    """Response from admin load operation."""
+
+    status: str = Field(..., description="Operation status")
+    service: str = Field(..., description="Service that was loaded")
+    previously_loaded: Optional[str] = Field(
+        default=None, description="Previously loaded service"
+    )
+    actions: List[Dict[str, Any]] = Field(
+        default_factory=list, description="Load/unload actions performed"
     )
 
 
-class PreloadResponse(BaseModel):
-    """Preload response with per-service results."""
+class AdminUnloadResponse(BaseModel):
+    """Response from admin unload operation."""
 
-    status: str = Field(..., description="Overall preload status")
-    results: Dict[str, Any] = Field(
-        default_factory=dict, description="Preload results per service"
+    status: str = Field(..., description="Operation status")
+    previously_loaded: Optional[str] = Field(
+        default=None, description="Service that was unloaded"
     )
 
 
-class ServiceStatus(BaseModel):
-    """Status of a single service."""
+class AdminStatusResponse(BaseModel):
+    """Response from admin status endpoint."""
 
-    name: str
-    url: str
-    healthy: bool
-    response_time_ms: Optional[float] = None
-    error: Optional[str] = None
+    currently_loaded: Optional[str] = Field(
+        default=None, description="Currently loaded service"
+    )
+    available_services: List[str] = Field(
+        default_factory=list, description="All available services"
+    )
 
 
 class DocumentationResponse(BaseModel):
     """API documentation response."""
 
     name: str = Field(default="Volsung Coordinator")
-    version: str = Field(default="2.0.0")
+    version: str = Field(default="3.0.0")
     description: str = Field(
-        default="Gateway for Volsung audio generation microservices"
+        default="Gateway for Volsung audio generation with smart model loading"
     )
     architecture: str = Field(default="microservices")
     services: Dict[str, Any] = Field(default_factory=dict)
     endpoints: Dict[str, Any] = Field(default_factory=dict)
-
-
-# ============================================================================
-# Global State
-# ============================================================================
-
-_service_registry: Optional[ServiceRegistry] = None
-
-
-def get_registry() -> ServiceRegistry:
-    """Get or create the service registry."""
-    global _service_registry
-    if _service_registry is None:
-        _service_registry = ServiceRegistry(
-            tts_url=TTS_SERVICE_URL,
-            music_url=MUSIC_SERVICE_URL,
-            sfx_url=SFX_SERVICE_URL,
-        )
-    return _service_registry
 
 
 # ============================================================================
@@ -160,28 +527,40 @@ def get_registry() -> ServiceRegistry:
 async def lifespan(app: FastAPI):
     """Manage application lifespan."""
     logger.info("=" * 60)
-    logger.info("Volsung Coordinator - Gateway for Audio Generation Services")
+    logger.info("Volsung Coordinator - Smart Model Loading Gateway")
     logger.info("=" * 60)
-    logger.info(f"TTS Service:    {TTS_SERVICE_URL}")
-    logger.info(f"Music Service:  {MUSIC_SERVICE_URL}")
-    logger.info(f"SFX Service:    {SFX_SERVICE_URL}")
+    logger.info(f"Qwen-Voice Service:  {QWEN_VOICE_SERVICE_URL}")
+    logger.info(f"Qwen-Base Service:   {QWEN_BASE_SERVICE_URL}")
+    logger.info(f"StyleTTS Service:    {STYLETTS_SERVICE_URL}")
+    logger.info(f"Music Service:       {MUSIC_SERVICE_URL}")
+    logger.info(f"SFX Service:         {SFX_SERVICE_URL}")
     logger.info("=" * 60)
     logger.info("")
-    logger.info("Endpoints:")
-    logger.info("  GET  /health        - Health check (aggregates all services)")
-    logger.info("  GET  /doc           - API documentation")
-    logger.info("  POST /preload       - Preload models in all services")
-    logger.info("  ANY  /voice/*       - Forward to TTS service")
-    logger.info("  ANY  /music/*       - Forward to Music service")
-    logger.info("  ANY  /sfx/*         - Forward to SFX service")
+    logger.info("Smart Loading Endpoints:")
+    logger.info("  POST /voice/design       → Qwen-Voice (auto-load)")
+    logger.info("  POST /voice/synthesize   → Qwen-Base (auto-load)")
+    logger.info("  POST /voice/styletts     → StyleTTS (auto-load)")
+    logger.info("  POST /music/generate     → Music (auto-load)")
+    logger.info("  POST /sfx/generate       → SFX (auto-load)")
+    logger.info("")
+    logger.info("Admin Endpoints:")
+    logger.info("  POST /admin/load         - Force load service")
+    logger.info("  POST /admin/unload       - Force unload")
+    logger.info("  GET  /admin/status       - Show loaded service")
+    logger.info("")
+    logger.info("Other Endpoints:")
+    logger.info("  GET  /health             - Health check")
+    logger.info("  GET  /doc                - API documentation")
     logger.info("=" * 60)
 
     # Discover services on startup
     services = await discover_services(
         ports={
-            "tts": 8001,
-            "music": 8002,
-            "sfx": 8003,
+            "qwen-voice": 8001,
+            "qwen-base": 8002,
+            "styletts": 8003,
+            "music": 8004,
+            "sfx": 8005,
         }
     )
 
@@ -193,20 +572,19 @@ async def lifespan(app: FastAPI):
 
     # Cleanup on shutdown
     logger.info("Shutting down coordinator...")
-    await close_service_registry()
-    _service_registry = None
+    await close_registry()
 
 
 app = FastAPI(
     title="Volsung Coordinator",
-    description="Gateway for Volsung audio generation microservices",
-    version="2.0.0",
+    description="Gateway for Volsung audio generation with smart model loading",
+    version="3.0.0",
     lifespan=lifespan,
 )
 
 
 # ============================================================================
-# Health & Status Endpoints
+# Health & Documentation Endpoints
 # ============================================================================
 
 
@@ -214,10 +592,12 @@ app = FastAPI(
 async def health():
     """Check health status of all services.
 
-    Aggregates health information from:
-    - TTS service (port 8001)
-    - Music service (port 8002)
-    - SFX service (port 8003)
+    Aggregates health information from all services:
+    - Qwen-Voice service (port 8001)
+    - Qwen-Base service (port 8002)
+    - StyleTTS service (port 8003)
+    - Music service (port 8004)
+    - SFX service (port 8005)
 
     Returns:
         HealthResponse with overall status and per-service details
@@ -268,171 +648,194 @@ async def documentation():
     Returns:
         DocumentationResponse with service endpoints and usage examples
     """
+    registry = get_registry()
+    status = await registry.get_status()
+
     return {
         "name": "Volsung Coordinator",
-        "version": "2.0.0",
-        "description": "Gateway for Volsung audio generation microservices",
+        "version": "3.0.0",
+        "description": "Gateway for Volsung audio generation with smart model loading",
         "architecture": "microservices",
+        "currently_loaded": status["currently_loaded"],
         "services": {
-            "tts": {
-                "url": TTS_SERVICE_URL,
-                "endpoints": [
-                    "GET  /health - Health check",
-                    "POST /voice/design - Generate voice from description",
-                    "POST /voice/synthesize - Synthesize with cloned voice",
-                ],
+            "qwen-voice": {
+                "url": QWEN_VOICE_SERVICE_URL,
+                "endpoints": ["POST /voice/design - Generate voice from description"],
+            },
+            "qwen-base": {
+                "url": QWEN_BASE_SERVICE_URL,
+                "endpoints": ["POST /voice/synthesize - Synthesize with cloned voice"],
+            },
+            "styletts": {
+                "url": STYLETTS_SERVICE_URL,
+                "endpoints": ["POST /voice/styletts - Generate voice using StyleTTS2"],
             },
             "music": {
                 "url": MUSIC_SERVICE_URL,
-                "endpoints": [
-                    "GET  /health - Health check",
-                    "GET  /info - Service information",
-                    "POST /music/generate - Generate music from description",
-                ],
+                "endpoints": ["POST /music/generate - Generate music from description"],
             },
             "sfx": {
                 "url": SFX_SERVICE_URL,
                 "endpoints": [
-                    "GET  /health - Health check",
                     "POST /sfx/generate - Generate sound effects",
                     "POST /sfx/layer - Generate layered SFX",
                 ],
             },
         },
         "endpoints": {
-            "GET /health": {
-                "description": "Check health of all services",
-                "example_response": {
-                    "status": "healthy",
-                    "coordinator": "healthy",
-                    "services": {
-                        "tts": {"healthy": True, "response_time_ms": 12.5},
-                        "music": {"healthy": True, "response_time_ms": 8.3},
-                        "sfx": {"healthy": True, "response_time_ms": 15.1},
-                    },
-                    "available": ["tts", "music", "sfx"],
-                    "unavailable": [],
-                },
-            },
-            "POST /preload": {
-                "description": "Preload models across all services",
-                "request": {"models": ["all"]},
-                "example_response": {
-                    "status": "ok",
-                    "results": {
-                        "tts": {"status": "loaded"},
-                        "music": {"status": "loaded"},
-                        "sfx": {"status": "loaded"},
-                    },
-                },
-            },
             "POST /voice/design": {
-                "description": "Generate voice from description (proxied to TTS)",
-                "request": {
+                "description": "Generate voice using Qwen-Voice (auto-loads model)",
+                "service": "qwen-voice",
+                "example_request": {
                     "text": "Hello, I am John.",
                     "instruct": "A warm, elderly man's voice",
                     "language": "English",
                 },
             },
+            "POST /voice/synthesize": {
+                "description": "Synthesize with cloned voice (auto-loads model)",
+                "service": "qwen-base",
+                "example_request": {
+                    "text": "Hello, I am John.",
+                    "voice_id": "cloned_voice_123",
+                },
+            },
+            "POST /voice/styletts": {
+                "description": "Generate voice using StyleTTS2 (auto-loads model)",
+                "service": "styletts",
+                "example_request": {
+                    "text": "Hello, I am John.",
+                    "styletts_params": {"embedding_scale": 1.0},
+                },
+            },
             "POST /music/generate": {
-                "description": "Generate music from description (proxied to Music)",
-                "request": {
+                "description": "Generate music from description (auto-loads model)",
+                "service": "music",
+                "example_request": {
                     "description": "Peaceful acoustic guitar",
                     "duration": 10.0,
                 },
             },
             "POST /sfx/generate": {
-                "description": "Generate sound effects (proxied to SFX)",
-                "request": {
+                "description": "Generate sound effects (auto-loads model)",
+                "service": "sfx",
+                "example_request": {
                     "description": "Footsteps on gravel",
                     "duration": 3.0,
                 },
             },
-        },
-        "environment_variables": {
-            "TTS_SERVICE_URL": f"TTS service URL (default: {TTS_SERVICE_URL})",
-            "MUSIC_SERVICE_URL": f"Music service URL (default: {MUSIC_SERVICE_URL})",
-            "SFX_SERVICE_URL": f"SFX service URL (default: {SFX_SERVICE_URL})",
+            "GET /admin/status": {
+                "description": "Show which service currently has model loaded",
+            },
+            "POST /admin/load": {
+                "description": "Force load a specific service",
+                "example_request": {"service": "music"},
+            },
+            "POST /admin/unload": {
+                "description": "Force unload current service",
+            },
         },
     }
 
 
-@app.post("/preload", response_model=PreloadResponse)
-async def preload(request: PreloadRequest):
-    """Preload models across all services.
+# ============================================================================
+# Admin Endpoints
+# ============================================================================
 
-    Forwards preload requests to each service that supports it.
-    Services that are unavailable will be skipped.
+
+@app.post("/admin/load", response_model=AdminLoadResponse)
+async def admin_load(request: AdminLoadRequest):
+    """Force load a specific service.
+
+    This is useful for:
+    - Pre-loading a model before requests come in
+    - Testing that a service is working
+    - Forcing a model switch
 
     Args:
-        request: PreloadRequest with list of models to preload
+        request: AdminLoadRequest with service name
 
     Returns:
-        PreloadResponse with results from each service
+        AdminLoadResponse with load results
     """
     registry = get_registry()
-    results: Dict[str, Any] = {}
-    any_success = False
 
-    # Services that support preloading
-    preload_endpoints = {
-        "tts": ("/preload", "tts"),
-        "music": ("/preload", "music"),
-        "sfx": ("/preload", "sfx"),
-    }
+    try:
+        service_name = ServiceName(request.service)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Invalid service name",
+                "requested": request.service,
+                "available": [s.value for s in ServiceName],
+            },
+        )
 
-    for service_name, (endpoint, client_name) in preload_endpoints.items():
-        try:
-            client = registry.get_client(client_name)
-            response = await client.forward(
-                endpoint,
-                method="POST",
-                json={"models": request.models},
-                skip_retry=True,  # Don't retry preloads
-            )
+    result = await registry.force_load(service_name)
 
-            if response.status_code == 200:
-                results[service_name] = response.json()
-                any_success = True
-            else:
-                results[service_name] = {
-                    "status": "error",
-                    "code": response.status_code,
-                }
+    return AdminLoadResponse(
+        status="success" if result.get("action") != "failed" else "failed",
+        service=service_name.value,
+        previously_loaded=result.get("previously_loaded"),
+        actions=result.get("actions", []),
+    )
 
-        except HTTPException as e:
-            results[service_name] = {
-                "status": "unavailable",
-                "error": e.detail
-                if isinstance(e.detail, str)
-                else "Service unavailable",
-            }
-        except Exception as e:
-            results[service_name] = {
-                "status": "error",
-                "error": str(e),
-            }
 
-    status = "ok" if any_success else "failed"
-    return PreloadResponse(status=status, results=results)
+@app.post("/admin/unload", response_model=AdminUnloadResponse)
+async def admin_unload():
+    """Force unload currently loaded service.
+
+    This frees up GPU memory.
+
+    Returns:
+        AdminUnloadResponse with unload results
+    """
+    registry = get_registry()
+    result = await registry.force_unload()
+
+    return AdminUnloadResponse(
+        status="success" if result.get("status") not in ["failed", None] else "noop",
+        previously_loaded=result.get("previously_loaded"),
+    )
+
+
+@app.get("/admin/status", response_model=AdminStatusResponse)
+async def admin_status():
+    """Get current loading status.
+
+    Shows which service currently has its model loaded.
+
+    Returns:
+        AdminStatusResponse with current status
+    """
+    registry = get_registry()
+    status = await registry.get_status()
+
+    return AdminStatusResponse(
+        currently_loaded=status["currently_loaded"],
+        available_services=status["available_services"],
+    )
 
 
 # ============================================================================
-# Service Routing Endpoints
+# Smart Forwarding with Auto-Loading
 # ============================================================================
 
 
-async def forward_to_service(
+async def smart_forward(
     request: Request,
-    service_name: str,
+    service_name: ServiceName,
     path: str,
+    skip_smart_load: bool = False,
 ) -> Response:
-    """Forward a request to the appropriate service.
+    """Forward request with smart model loading.
 
     Args:
         request: Incoming FastAPI request
-        service_name: Name of the service (tts, music, sfx)
+        service_name: Target service
         path: Path to forward to
+        skip_smart_load: If True, don't trigger load/unload
 
     Returns:
         Response from the service
@@ -443,6 +846,27 @@ async def forward_to_service(
     registry = get_registry()
     client = registry.get_client(service_name)
 
+    # Smart loading (unless skipped)
+    if not skip_smart_load:
+        try:
+            load_result = await registry.ensure_loaded(service_name)
+            if load_result.get("action") != "noop":
+                logger.info(
+                    f"Smart load: {load_result.get('previously_loaded')} → {service_name.value}"
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Smart loading failed: {e}")
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "Smart loading failed",
+                    "service": service_name.value,
+                    "message": str(e),
+                },
+            )
+
     # Read request body
     body = await request.body()
     json_data = None
@@ -452,12 +876,11 @@ async def forward_to_service(
 
             json_data = json.loads(body)
         except json.JSONDecodeError:
-            # Not JSON, pass as raw data
             pass
 
     # Prepare headers
     headers = dict(request.headers)
-    headers.pop("host", None)  # Remove host header (will be set by client)
+    headers.pop("host", None)
 
     try:
         response = await client.forward(
@@ -468,7 +891,6 @@ async def forward_to_service(
             headers=headers,
         )
 
-        # Forward response
         return Response(
             content=response.content,
             status_code=response.status_code,
@@ -479,55 +901,79 @@ async def forward_to_service(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error forwarding to {service_name}: {e}")
+        logger.error(f"Error forwarding to {service_name.value}: {e}")
         raise HTTPException(
             status_code=503,
             detail={
                 "error": "Service unavailable",
-                "service": service_name,
+                "service": service_name.value,
                 "message": str(e),
-                "suggestion": f"Check that the {service_name} service is running",
+                "suggestion": f"Check that the {service_name.value} service is running",
             },
         )
 
 
-# TTS Service Routes
-@app.api_route("/voice/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
-async def tts_proxy(request: Request, path: str):
-    """Proxy all voice-related requests to TTS service.
+# ============================================================================
+# Service Routing Endpoints (with Smart Loading)
+# ============================================================================
 
-    Routes:
-        POST /voice/design - Generate voice from description
-        POST /voice/synthesize - Synthesize with cloned voice
-        GET  /voice/* - Other TTS endpoints
+
+# Voice: Design (Qwen-Voice)
+@app.api_route("/voice/design", methods=["GET", "POST", "PUT", "DELETE"])
+@app.api_route("/voice/design/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def voice_design_proxy(request: Request, path: str = ""):
+    """Proxy voice/design requests to Qwen-Voice service.
+
+    Triggers smart loading to ensure Qwen-Voice model is loaded.
     """
-    return await forward_to_service(request, "tts", f"/voice/{path}")
+    target_path = f"/voice/design/{path}" if path else "/voice/design"
+    return await smart_forward(request, ServiceName.QWEN_VOICE, target_path)
 
 
-# Music Service Routes
+# Voice: Synthesize (Qwen-Base)
+@app.api_route("/voice/synthesize", methods=["GET", "POST", "PUT", "DELETE"])
+@app.api_route(
+    "/voice/synthesize/{path:path}", methods=["GET", "POST", "PUT", "DELETE"]
+)
+async def voice_synthesize_proxy(request: Request, path: str = ""):
+    """Proxy voice/synthesize requests to Qwen-Base service.
+
+    Triggers smart loading to ensure Qwen-Base model is loaded.
+    """
+    target_path = f"/voice/synthesize/{path}" if path else "/voice/synthesize"
+    return await smart_forward(request, ServiceName.QWEN_BASE, target_path)
+
+
+# Voice: StyleTTS
+@app.api_route("/voice/styletts", methods=["GET", "POST", "PUT", "DELETE"])
+@app.api_route("/voice/styletts/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def voice_styletts_proxy(request: Request, path: str = ""):
+    """Proxy voice/styletts requests to StyleTTS service.
+
+    Triggers smart loading to ensure StyleTTS model is loaded.
+    """
+    target_path = f"/voice/styletts/{path}" if path else "/voice/styletts"
+    return await smart_forward(request, ServiceName.STYLETTS, target_path)
+
+
+# Music
 @app.api_route("/music/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def music_proxy(request: Request, path: str):
-    """Proxy all music-related requests to Music service.
+    """Proxy music requests to Music service.
 
-    Routes:
-        POST /music/generate - Generate music from description
-        GET  /music/info - Service information
-        GET  /music/* - Other Music endpoints
+    Triggers smart loading to ensure Music model is loaded.
     """
-    return await forward_to_service(request, "music", f"/music/{path}")
+    return await smart_forward(request, ServiceName.MUSIC, f"/music/{path}")
 
 
-# SFX Service Routes
+# SFX
 @app.api_route("/sfx/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
 async def sfx_proxy(request: Request, path: str):
-    """Proxy all SFX-related requests to SFX service.
+    """Proxy sfx requests to SFX service.
 
-    Routes:
-        POST /sfx/generate - Generate sound effects
-        POST /sfx/layer - Generate layered SFX
-        GET  /sfx/* - Other SFX endpoints
+    Triggers smart loading to ensure SFX model is loaded.
     """
-    return await forward_to_service(request, "sfx", f"/sfx/{path}")
+    return await smart_forward(request, ServiceName.SFX, f"/sfx/{path}")
 
 
 # ============================================================================

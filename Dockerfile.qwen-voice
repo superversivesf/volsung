@@ -1,0 +1,59 @@
+# Volsung Qwen VoiceDesign Service Dockerfile
+# Standalone Qwen VoiceDesign service for voice cloning and voice design
+# Uses Qwen3-TTS VoiceDesign model
+
+FROM python:3.10-slim
+
+# Prevent Python from writing pyc files and buffering stdout
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONFAULTHANDLER=1
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+# - ffmpeg: Audio processing
+# - libsndfile1: Sound file I/O
+# - git: For potential git-based dependencies
+# - curl: For health checks
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libsndfile1 \
+    libsndfile1-dev \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first for better layer caching
+COPY requirements/services/qwen-voice.txt /app/requirements.txt
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Create directories for models and outputs
+RUN mkdir -p /app/models /app/outputs
+
+# Copy the volsung package
+COPY volsung/__init__.py /app/volsung/__init__.py
+COPY volsung/services/__init__.py /app/volsung/services/__init__.py
+COPY volsung/services/qwen_voice_service.py /app/volsung/services/qwen_voice_service.py
+
+# Set Python path
+ENV PYTHONPATH=/app
+
+# Service configuration
+ENV QWEN_VOICE_SERVICE_HOST=0.0.0.0
+ENV QWEN_VOICE_SERVICE_PORT=8001
+ENV QWEN_VOICE_MODEL_NAME=Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign
+ENV QWEN_VOICE_MODEL_CACHE=/app/models
+
+# Expose port
+EXPOSE 8001
+
+# Health check using curl
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD curl -f http://localhost:8001/health || exit 1
+
+# Run the Qwen Voice service
+CMD ["python", "-m", "uvicorn", "volsung.services.qwen_voice_service:app", "--host", "0.0.0.0", "--port", "8001"]

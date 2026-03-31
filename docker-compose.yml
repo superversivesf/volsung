@@ -3,9 +3,11 @@
 #
 # Services:
 #   - coordinator: Main API gateway (port 8000)
-#   - tts: Text-to-Speech service (port 8001)
-#   - music: Music generation service (port 8002)
-#   - sfx: Sound effects generation service (port 8003)
+#   - qwen-voice: Qwen VoiceDesign service (port 8001)
+#   - qwen-base: Qwen Base TTS service (port 8002)
+#   - styletts: StyleTTS2 service (port 8003)
+#   - music: MusicGen service (port 8004)
+#   - sfx: AudioLDM sound effects service (port 8005)
 #
 # Usage:
 #   docker-compose up -d        # Start all services
@@ -17,26 +19,25 @@
 
 services:
   # ============================================================================
-  # TTS Service (Text-to-Speech)
+  # Qwen VoiceDesign Service (Voice Cloning with Qwen3-TTS)
   # ============================================================================
-  tts:
+  qwen-voice:
     build:
       context: .
-      dockerfile: Dockerfile.tts
-      args:
-        - PYTHON_VERSION=3.10
-    container_name: volsung-tts
+      dockerfile: Dockerfile.qwen-voice
+    container_name: volsung-qwen-voice
     environment:
-      - TTS_SERVICE_HOST=0.0.0.0
-      - TTS_SERVICE_PORT=8001
-      - TTS_IDLE_TIMEOUT=300
+      - QWEN_VOICE_SERVICE_HOST=0.0.0.0
+      - QWEN_VOICE_SERVICE_PORT=8001
+      - QWEN_VOICE_IDLE_TIMEOUT=300
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
     ports:
       - "8001:8001"
     volumes:
-      - tts_models:/app/models
-      - tts_cache:/root/.cache
+      - qwen_voice_models:/app/models
+      - qwen_voice_cache:/root/.cache
+      - qwen_voice_outputs:/app/outputs
     networks:
       - volsung-network
     healthcheck:
@@ -44,7 +45,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 120s
     restart: unless-stopped
     deploy:
       resources:
@@ -55,25 +56,25 @@ services:
               capabilities: [gpu]
 
   # ============================================================================
-  # Music Service (Music Generation)
+  # Qwen Base Service (Base TTS with Qwen3-TTS)
   # ============================================================================
-  music:
+  qwen-base:
     build:
       context: .
-      dockerfile: Dockerfile.music
-      args:
-        - PYTHON_VERSION=3.9
-    container_name: volsung-music
+      dockerfile: Dockerfile.qwen-base
+    container_name: volsung-qwen-base
     environment:
-      - MUSIC_SERVICE_HOST=0.0.0.0
-      - MUSIC_SERVICE_PORT=8002
+      - QWEN_BASE_SERVICE_HOST=0.0.0.0
+      - QWEN_BASE_SERVICE_PORT=8002
+      - QWEN_BASE_IDLE_TIMEOUT=300
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
     ports:
       - "8002:8002"
     volumes:
-      - music_models:/app/models
-      - music_cache:/root/.cache
+      - qwen_base_models:/app/models
+      - qwen_base_cache:/root/.cache
+      - qwen_base_outputs:/app/outputs
     networks:
       - volsung-network
     healthcheck:
@@ -81,7 +82,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 120s
     restart: unless-stopped
     deploy:
       resources:
@@ -92,25 +93,25 @@ services:
               capabilities: [gpu]
 
   # ============================================================================
-  # SFX Service (Sound Effects Generation)
+  # StyleTTS2 Service (Text-to-Speech using StyleTTS2)
   # ============================================================================
-  sfx:
+  styletts:
     build:
       context: .
-      dockerfile: Dockerfile.sfx
-      args:
-        - PYTHON_VERSION=3.10
-    container_name: volsung-sfx
+      dockerfile: Dockerfile.styletts
+    container_name: volsung-styletts
     environment:
-      - SFX_SERVICE_HOST=0.0.0.0
-      - SFX_SERVICE_PORT=8003
+      - STYLETTS_SERVICE_HOST=0.0.0.0
+      - STYLETTS_SERVICE_PORT=8003
+      - STYLETTS_IDLE_TIMEOUT=300
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
     ports:
       - "8003:8003"
     volumes:
-      - sfx_models:/app/models
-      - sfx_cache:/root/.cache
+      - styletts_models:/app/models
+      - styletts_cache:/root/.cache
+      - styletts_outputs:/app/outputs
     networks:
       - volsung-network
     healthcheck:
@@ -118,7 +119,81 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 120s
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # ============================================================================
+  # Music Service (Music Generation using MusicGen)
+  # ============================================================================
+  music:
+    build:
+      context: .
+      dockerfile: Dockerfile.music
+    container_name: volsung-music
+    environment:
+      - MUSIC_SERVICE_HOST=0.0.0.0
+      - MUSIC_SERVICE_PORT=8004
+      - MUSIC_IDLE_TIMEOUT=300
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    ports:
+      - "8004:8004"
+    volumes:
+      - music_models:/app/models
+      - music_cache:/root/.cache
+      - music_outputs:/app/outputs
+    networks:
+      - volsung-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # ============================================================================
+  # SFX Service (Sound Effects Generation using AudioLDM)
+  # ============================================================================
+  sfx:
+    build:
+      context: .
+      dockerfile: Dockerfile.sfx
+    container_name: volsung-sfx
+    environment:
+      - SFX_SERVICE_HOST=0.0.0.0
+      - SFX_SERVICE_PORT=8005
+      - SFX_IDLE_TIMEOUT=300
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    ports:
+      - "8005:8005"
+    volumes:
+      - sfx_models:/app/models
+      - sfx_cache:/root/.cache
+      - sfx_outputs:/app/outputs
+    networks:
+      - volsung-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
     restart: unless-stopped
     deploy:
       resources:
@@ -135,21 +210,27 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.coordinator
-      args:
-        - PYTHON_VERSION=3.10
     container_name: volsung-coordinator
     environment:
       - COORDINATOR_HOST=0.0.0.0
       - COORDINATOR_PORT=8000
-      - TTS_SERVICE_URL=http://tts:8001
-      - MUSIC_SERVICE_URL=http://music:8002
-      - SFX_SERVICE_URL=http://sfx:8003
+      - QWEN_VOICE_SERVICE_URL=http://qwen-voice:8001
+      - QWEN_BASE_SERVICE_URL=http://qwen-base:8002
+      - STYLETTS_SERVICE_URL=http://styletts:8003
+      - MUSIC_SERVICE_URL=http://music:8004
+      - SFX_SERVICE_URL=http://sfx:8005
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
     ports:
       - "8000:8000"
+    volumes:
+      - coordinator_outputs:/app/outputs
     depends_on:
-      tts:
+      qwen-voice:
+        condition: service_healthy
+      qwen-base:
+        condition: service_healthy
+      styletts:
         condition: service_healthy
       music:
         condition: service_healthy
@@ -169,17 +250,48 @@ services:
 # Volumes for persistent data
 # ==============================================================================
 volumes:
-  tts_models:
+  # Qwen Voice service
+  qwen_voice_models:
     driver: local
-  tts_cache:
+  qwen_voice_cache:
     driver: local
+  qwen_voice_outputs:
+    driver: local
+  
+  # Qwen Base service
+  qwen_base_models:
+    driver: local
+  qwen_base_cache:
+    driver: local
+  qwen_base_outputs:
+    driver: local
+  
+  # StyleTTS2 service
+  styletts_models:
+    driver: local
+  styletts_cache:
+    driver: local
+  styletts_outputs:
+    driver: local
+  
+  # Music service
   music_models:
     driver: local
   music_cache:
     driver: local
+  music_outputs:
+    driver: local
+  
+  # SFX service
   sfx_models:
     driver: local
   sfx_cache:
+    driver: local
+  sfx_outputs:
+    driver: local
+  
+  # Coordinator
+  coordinator_outputs:
     driver: local
 
 # ==============================================================================

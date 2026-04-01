@@ -135,6 +135,81 @@ services:
               capabilities: [gpu]
 
   # ============================================================================
+  # IndexTTS-2 Service (Voice Cloning with Emotion Control)
+  # ============================================================================
+  indextts:
+    build:
+      context: .
+      dockerfile: Dockerfile.indextts
+    container_name: volsung-indextts
+    environment:
+      - INDEXTTS_SERVICE_HOST=0.0.0.0
+      - INDEXTTS_SERVICE_PORT=8006
+      - INDEXTTS_IDLE_TIMEOUT=300
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    ports:
+      - "8006:8006"
+    volumes:
+      - indextts_models:/app/models
+      - indextts_cache:/root/.cache
+      - indextts_outputs:/app/outputs
+      - indextts_checkpoints:/app/checkpoints
+    networks:
+      - volsung-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8006/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 900s  # 15 minutes for initial download
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # ============================================================================
+  # Chatterbox Service (Voice Cloning with Expressiveness Control)
+  # ============================================================================
+  chatterbox:
+    build:
+      context: .
+      dockerfile: Dockerfile.chatterbox
+    container_name: volsung-chatterbox
+    environment:
+      - CHATTERBOX_SERVICE_HOST=0.0.0.0
+      - CHATTERBOX_SERVICE_PORT=8007
+      - CHATTERBOX_IDLE_TIMEOUT=300
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    ports:
+      - "8007:8007"
+    volumes:
+      - chatterbox_models:/app/models
+      - chatterbox_cache:/root/.cache
+      - chatterbox_outputs:/app/outputs
+    networks:
+      - volsung-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8007/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 900s  # 15 minutes for initial download
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # ============================================================================
   # Music Service (Mustango - Apache 2.0 Licensed)
   # Note: MusicGen replaced with Mustango for Python 3.10+ compatibility
   # ============================================================================
@@ -223,6 +298,8 @@ services:
       - QWEN_VOICE_SERVICE_URL=http://qwen-voice:8001
       - QWEN_BASE_SERVICE_URL=http://qwen-base:8002
       - STYLETTS_SERVICE_URL=http://styletts:8003
+      - INDEXTTS_SERVICE_URL=http://indextts:8006
+      - CHATTERBOX_SERVICE_URL=http://chatterbox:8007
       - MUSIC_SERVICE_URL=http://music:8005
       - SFX_SERVICE_URL=http://sfx:8004
       - PYTHONUNBUFFERED=1
@@ -237,6 +314,10 @@ services:
       qwen-base:
         condition: service_healthy
       styletts:
+        condition: service_healthy
+      indextts:
+        condition: service_healthy
+      chatterbox:
         condition: service_healthy
       music:
         condition: service_healthy
@@ -280,6 +361,24 @@ volumes:
   styletts_outputs:
     driver: local
   
+  # IndexTTS-2 service
+  indextts_models:
+    driver: local
+  indextts_cache:
+    driver: local
+  indextts_outputs:
+    driver: local
+  indextts_checkpoints:
+    driver: local
+
+  # Chatterbox service
+  chatterbox_models:
+    driver: local
+  chatterbox_cache:
+    driver: local
+  chatterbox_outputs:
+    driver: local
+
   # Music service
   music_models:
     driver: local

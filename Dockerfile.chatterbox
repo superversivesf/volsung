@@ -1,0 +1,50 @@
+# Volsung Chatterbox TTS Service Dockerfile
+# Voice cloning with emotion control via exaggeration parameter
+
+FROM python:3.10-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONFAULTHANDLER=1
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libsndfile1 \
+    libsndfile1-dev \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first for better layer caching
+COPY requirements/services/chatterbox.txt /app/requirements.txt
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Create directories for models and outputs
+RUN mkdir -p /app/models /app/outputs
+
+# Copy the volsung package
+COPY volsung/__init__.py /app/volsung/__init__.py
+COPY volsung/services/__init__.py /app/volsung/services/__init__.py
+COPY volsung/services/chatterbox_service.py /app/volsung/services/chatterbox_service.py
+
+# Set Python path
+ENV PYTHONPATH=/app
+
+# Service configuration
+ENV CHATTERBOX_SERVICE_HOST=0.0.0.0
+ENV CHATTERBOX_SERVICE_PORT=8007
+
+# Expose port
+EXPOSE 8007
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD curl -f http://localhost:8007/health || exit 1
+
+# Run the Chatterbox service
+CMD ["python", "-m", "uvicorn", "volsung.services.chatterbox_service:app", "--host", "0.0.0.0", "--port", "8007"]

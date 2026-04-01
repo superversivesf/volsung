@@ -1,0 +1,20 @@
+# Chatterbox TTS Service Requirements
+
+# Core FastAPI stack
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+pydantic>=2.0.0
+
+# Audio processing
+soundfile>=0.12.1
+numpy>=1.24.0
+
+# PyTorch
+torch>=2.2.0
+torchaudio>=2.0.0
+
+# Chatterbox TTS (Resemble AI)
+chatterbox-tts
+
+# HuggingFace for model downloads
+huggingface-hub>=0.20.0

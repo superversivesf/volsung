@@ -36,8 +36,10 @@ DEFAULT_SERVICE_PORTS = {
     "qwen-voice": 8001,
     "qwen-base": 8002,
     "styletts": 8003,
-    "music": 8004,
-    "sfx": 8005,
+    "indextts": 8006,
+    "chatterbox": 8007,
+    "music": 8005,
+    "sfx": 8004,
 }
 
 DEFAULT_TIMEOUT = 60.0  # seconds for long-running ML inference
@@ -398,21 +400,17 @@ class ServiceRegistry:
         qwen_voice_url: str = "http://localhost:8001",
         qwen_base_url: str = "http://localhost:8002",
         styletts_url: str = "http://localhost:8003",
-        music_url: str = "http://localhost:8004",
-        sfx_url: str = "http://localhost:8005",
+        indextts_url: str = "http://localhost:8006",
+        chatterbox_url: str = "http://localhost:8007",
+        music_url: str = "http://localhost:8005",
+        sfx_url: str = "http://localhost:8004",
     ):
-        """Initialize the service registry.
-
-        Args:
-            qwen_voice_url: Qwen-Voice service URL
-            qwen_base_url: Qwen-Base service URL
-            styletts_url: StyleTTS service URL
-            music_url: Music service URL
-            sfx_url: SFX service URL
-        """
+        """Initialize the service registry."""
         self.qwen_voice = ServiceClient(qwen_voice_url)
         self.qwen_base = ServiceClient(qwen_base_url)
         self.styletts = ServiceClient(styletts_url)
+        self.indextts = ServiceClient(indextts_url)
+        self.chatterbox = ServiceClient(chatterbox_url)
         self.music = ServiceClient(music_url)
         self.sfx = ServiceClient(sfx_url)
 
@@ -420,6 +418,8 @@ class ServiceRegistry:
             "qwen-voice": self.qwen_voice,
             "qwen-base": self.qwen_base,
             "styletts": self.styletts,
+            "indextts": self.indextts,
+            "chatterbox": self.chatterbox,
             "music": self.music,
             "sfx": self.sfx,
         }

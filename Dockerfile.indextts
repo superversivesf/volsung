@@ -1,0 +1,58 @@
+# Volsung IndexTTS-2 Service Dockerfile
+# Voice cloning with fine-grained emotion control
+
+FROM python:3.10-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONFAULTHANDLER=1
+
+WORKDIR /app
+
+# Install system dependencies (git-lfs needed for IndexTTS-2 model files)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libsndfile1 \
+    libsndfile1-dev \
+    git \
+    git-lfs \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && git lfs install
+
+# Copy requirements first for better layer caching
+COPY requirements/services/indextts.txt /app/requirements.txt
+
+# Install base Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Clone and install IndexTTS-2 from source
+RUN git clone https://github.com/index-tts/index-tts.git /app/index-tts \
+    && cd /app/index-tts \
+    && pip install --no-cache-dir -e .
+
+# Create directories for models and outputs
+RUN mkdir -p /app/models /app/outputs /app/checkpoints
+
+# Copy the volsung package
+COPY volsung/__init__.py /app/volsung/__init__.py
+COPY volsung/services/__init__.py /app/volsung/services/__init__.py
+COPY volsung/services/indextts_service.py /app/volsung/services/indextts_service.py
+
+# Set Python path
+ENV PYTHONPATH=/app:/app/index-tts
+
+# Service configuration
+ENV INDEXTTS_SERVICE_HOST=0.0.0.0
+ENV INDEXTTS_SERVICE_PORT=8006
+ENV INDEXTTS_MODEL_DIR=/app/checkpoints
+
+# Expose port
+EXPOSE 8006
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD curl -f http://localhost:8006/health || exit 1
+
+# Run the IndexTTS-2 service
+CMD ["python", "-m", "uvicorn", "volsung.services.indextts_service:app", "--host", "0.0.0.0", "--port", "8006"]

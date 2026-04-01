@@ -9,6 +9,8 @@ Service Registry:
 - /voice/design → qwen-voice:8001
 - /voice/synthesize → qwen-base:8002
 - /voice/styletts → styletts:8003
+- /voice/indextts → indextts:8006
+- /voice/chatterbox → chatterbox:8007
 - /sfx/generate → sfx:8004
 - /music/generate → music:8005
 
@@ -38,6 +40,8 @@ Environment Variables:
     QWEN_VOICE_SERVICE_URL: Qwen voice service (default: http://localhost:8001)
     QWEN_BASE_SERVICE_URL: Qwen base service (default: http://localhost:8002)
     STYLETTS_SERVICE_URL: StyleTTS service (default: http://localhost:8003)
+    INDEXTTS_SERVICE_URL: IndexTTS-2 service (default: http://localhost:8006)
+    CHATTERBOX_SERVICE_URL: Chatterbox service (default: http://localhost:8007)
     SFX_SERVICE_URL: SFX service (default: http://localhost:8004)
     MUSIC_SERVICE_URL: Music service (default: http://localhost:8005)
     COORDINATOR_HOST: Coordinator bind address (default: 0.0.0.0)
@@ -73,6 +77,8 @@ logger = logging.getLogger(__name__)
 QWEN_VOICE_SERVICE_URL = os.getenv("QWEN_VOICE_SERVICE_URL", "http://localhost:8001")
 QWEN_BASE_SERVICE_URL = os.getenv("QWEN_BASE_SERVICE_URL", "http://localhost:8002")
 STYLETTS_SERVICE_URL = os.getenv("STYLETTS_SERVICE_URL", "http://localhost:8003")
+INDEXTTS_SERVICE_URL = os.getenv("INDEXTTS_SERVICE_URL", "http://localhost:8006")
+CHATTERBOX_SERVICE_URL = os.getenv("CHATTERBOX_SERVICE_URL", "http://localhost:8007")
 MUSIC_SERVICE_URL = os.getenv("MUSIC_SERVICE_URL", "http://localhost:8005")
 SFX_SERVICE_URL = os.getenv("SFX_SERVICE_URL", "http://localhost:8005")
 COORDINATOR_HOST = os.getenv("COORDINATOR_HOST", "0.0.0.0")
@@ -89,6 +95,8 @@ class ServiceName(str, Enum):
     QWEN_VOICE = "qwen-voice"
     QWEN_BASE = "qwen-base"
     STYLETTS = "styletts"
+    INDEXTTS = "indextts"
+    CHATTERBOX = "chatterbox"
     MUSIC = "music"
     SFX = "sfx"
 
@@ -100,6 +108,8 @@ ENDPOINT_SERVICE_MAP = {
     "/voice/synthesize": ServiceName.QWEN_BASE,
     "/voice/styletts": ServiceName.STYLETTS,
     "/voice/styletts/design": ServiceName.STYLETTS,
+    "/voice/indextts": ServiceName.INDEXTTS,
+    "/voice/chatterbox": ServiceName.CHATTERBOX,
     # Music services
     "/music/generate": ServiceName.MUSIC,
     # SFX services
@@ -112,6 +122,8 @@ SERVICE_PORTS = {
     ServiceName.QWEN_VOICE: 8001,
     ServiceName.QWEN_BASE: 8002,
     ServiceName.STYLETTS: 8003,
+    ServiceName.INDEXTTS: 8006,
+    ServiceName.CHATTERBOX: 8007,
     ServiceName.MUSIC: 8005,
     ServiceName.SFX: 8004,
 }
@@ -132,22 +144,18 @@ class SmartServiceRegistry:
         qwen_voice_url: str = QWEN_VOICE_SERVICE_URL,
         qwen_base_url: str = QWEN_BASE_SERVICE_URL,
         styletts_url: str = STYLETTS_SERVICE_URL,
+        indextts_url: str = INDEXTTS_SERVICE_URL,
+        chatterbox_url: str = CHATTERBOX_SERVICE_URL,
         music_url: str = MUSIC_SERVICE_URL,
         sfx_url: str = SFX_SERVICE_URL,
     ):
-        """Initialize the smart service registry.
-
-        Args:
-            qwen_voice_url: Qwen voice service URL
-            qwen_base_url: Qwen base service URL
-            styletts_url: StyleTTS service URL
-            music_url: Music service URL
-            sfx_url: SFX service URL
-        """
+        """Initialize the smart service registry."""
         self._clients: Dict[ServiceName, ServiceClient] = {
             ServiceName.QWEN_VOICE: ServiceClient(qwen_voice_url),
             ServiceName.QWEN_BASE: ServiceClient(qwen_base_url),
             ServiceName.STYLETTS: ServiceClient(styletts_url),
+            ServiceName.INDEXTTS: ServiceClient(indextts_url),
+            ServiceName.CHATTERBOX: ServiceClient(chatterbox_url),
             ServiceName.MUSIC: ServiceClient(music_url),
             ServiceName.SFX: ServiceClient(sfx_url),
         }
@@ -156,6 +164,8 @@ class SmartServiceRegistry:
             ServiceName.QWEN_VOICE: qwen_voice_url,
             ServiceName.QWEN_BASE: qwen_base_url,
             ServiceName.STYLETTS: styletts_url,
+            ServiceName.INDEXTTS: indextts_url,
+            ServiceName.CHATTERBOX: chatterbox_url,
             ServiceName.MUSIC: music_url,
             ServiceName.SFX: sfx_url,
         }
@@ -670,6 +680,14 @@ async def documentation():
                 "url": STYLETTS_SERVICE_URL,
                 "endpoints": ["POST /voice/styletts - Generate voice using StyleTTS2"],
             },
+            "indextts": {
+                "url": INDEXTTS_SERVICE_URL,
+                "endpoints": ["POST /voice/indextts - Generate voice with emotion control (IndexTTS-2)"],
+            },
+            "chatterbox": {
+                "url": CHATTERBOX_SERVICE_URL,
+                "endpoints": ["POST /voice/chatterbox - Generate voice with expressiveness control (Chatterbox)"],
+            },
             "music": {
                 "url": MUSIC_SERVICE_URL,
                 "endpoints": ["POST /music/generate - Generate music from description"],
@@ -706,6 +724,30 @@ async def documentation():
                 "example_request": {
                     "text": "Hello, I am John.",
                     "styletts_params": {"embedding_scale": 1.0},
+                },
+            },
+            "POST /voice/indextts": {
+                "description": "Generate voice with emotion control using IndexTTS-2 (auto-loads model)",
+                "service": "indextts",
+                "example_request": {
+                    "text": "Hello, I am John.",
+                    "ref_audio": "<base64-encoded WAV>",
+                    "indextts_params": {
+                        "emo_vector": [0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.2],
+                        "emo_alpha": 0.7,
+                    },
+                },
+            },
+            "POST /voice/chatterbox": {
+                "description": "Generate voice with expressiveness control using Chatterbox (auto-loads model)",
+                "service": "chatterbox",
+                "example_request": {
+                    "text": "Hello, I am John.",
+                    "ref_audio": "<base64-encoded WAV>",
+                    "chatterbox_params": {
+                        "exaggeration": 0.6,
+                        "cfg_weight": 0.5,
+                    },
                 },
             },
             "POST /music/generate": {
@@ -1000,6 +1042,24 @@ async def voice_styletts_proxy(request: Request, path: str = ""):
     """
     target_path = f"/generate/{path}" if path else "/generate"
     return await smart_forward(request, ServiceName.STYLETTS, target_path)
+
+
+# Voice: IndexTTS-2
+@app.api_route("/voice/indextts", methods=["GET", "POST", "PUT", "DELETE"])
+@app.api_route("/voice/indextts/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def voice_indextts_proxy(request: Request, path: str = ""):
+    """Proxy voice/indextts requests to IndexTTS-2 service."""
+    target_path = f"/generate/{path}" if path else "/generate"
+    return await smart_forward(request, ServiceName.INDEXTTS, target_path)
+
+
+# Voice: Chatterbox
+@app.api_route("/voice/chatterbox", methods=["GET", "POST", "PUT", "DELETE"])
+@app.api_route("/voice/chatterbox/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def voice_chatterbox_proxy(request: Request, path: str = ""):
+    """Proxy voice/chatterbox requests to Chatterbox service."""
+    target_path = f"/generate/{path}" if path else "/generate"
+    return await smart_forward(request, ServiceName.CHATTERBOX, target_path)
 
 
 # Music

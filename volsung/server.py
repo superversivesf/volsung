@@ -922,9 +922,11 @@ async def smart_forward(
         except json.JSONDecodeError:
             pass
 
-    # Prepare headers
+    # Prepare headers (remove hop-by-hop headers that httpx will set)
     headers = dict(request.headers)
     headers.pop("host", None)
+    headers.pop("content-length", None)
+    headers.pop("transfer-encoding", None)
 
     try:
         response = await client.forward(
@@ -970,7 +972,7 @@ async def voice_design_proxy(request: Request, path: str = ""):
 
     Triggers smart loading to ensure Qwen-Voice model is loaded.
     """
-    target_path = f"/voice/design/{path}" if path else "/voice/design"
+    target_path = f"/generate/{path}" if path else "/generate"
     return await smart_forward(request, ServiceName.QWEN_VOICE, target_path)
 
 
@@ -984,7 +986,7 @@ async def voice_synthesize_proxy(request: Request, path: str = ""):
 
     Triggers smart loading to ensure Qwen-Base model is loaded.
     """
-    target_path = f"/voice/synthesize/{path}" if path else "/voice/synthesize"
+    target_path = f"/generate/{path}" if path else "/generate"
     return await smart_forward(request, ServiceName.QWEN_BASE, target_path)
 
 
@@ -996,7 +998,7 @@ async def voice_styletts_proxy(request: Request, path: str = ""):
 
     Triggers smart loading to ensure StyleTTS model is loaded.
     """
-    target_path = f"/voice/styletts/{path}" if path else "/voice/styletts"
+    target_path = f"/generate/{path}" if path else "/generate"
     return await smart_forward(request, ServiceName.STYLETTS, target_path)
 
 
@@ -1017,7 +1019,7 @@ async def sfx_proxy(request: Request, path: str):
 
     Triggers smart loading to ensure SFX model is loaded.
     """
-    return await smart_forward(request, ServiceName.SFX, f"/sfx/{path}")
+    return await smart_forward(request, ServiceName.SFX, f"/{path}")
 
 
 # ============================================================================

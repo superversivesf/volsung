@@ -34,6 +34,9 @@ COPY requirements/services/styletts.txt /app/requirements.txt
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Download NLTK tokenizer data required by StyleTTS2
+RUN python -c "import nltk; nltk.download('punkt_tab', download_dir='/usr/local/nltk_data')"
+
 # Create directories for models and outputs
 RUN mkdir -p /app/models /app/outputs
 

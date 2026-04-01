@@ -99,9 +99,9 @@ class GenerateRequest(BaseModel):
         description="Text to synthesize",
         examples=["Hello, I am speaking with StyleTTS2."],
     )
-    ref_audio: str = Field(
-        ...,
-        description="Base64-encoded reference audio (WAV) for voice cloning. Required - StyleTTS2 only supports voice cloning.",
+    ref_audio: Optional[str] = Field(
+        default=None,
+        description="Base64-encoded reference audio (WAV) for voice cloning. If omitted, uses default voice.",
     )
     language: str = Field(
         default="English",
@@ -275,7 +275,16 @@ class StyleTTS2Manager:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        self._generator = tts.StyleTTS2()
+        # StyleTTS2 checkpoints predate PyTorch 2.6's weights_only=True default.
+        # Temporarily allow unsafe loading for these trusted HuggingFace weights.
+        _original_torch_load = torch.load
+        torch.load = lambda *args, **kwargs: _original_torch_load(
+            *args, **{**kwargs, "weights_only": False}
+        )
+        try:
+            self._generator = tts.StyleTTS2()
+        finally:
+            torch.load = _original_torch_load
         if hasattr(self._generator, "to"):
             self._generator.to(self._device)
 
@@ -316,52 +325,91 @@ class StyleTTS2Manager:
     def device(self) -> str:
         return self._device
 
-    def generate(
-        self,
-        text: str,
-        embedding_scale: float = 1.0,
-        alpha: float = 0.3,
-        beta: float = 0.7,
-    ) -> GenerateResponse:
-        """Generate speech with StyleTTS 2."""
+    def _inference(self, text: str, target_voice_path, embedding_scale, alpha, beta):
+        """Run StyleTTS2 inference and return normalized numpy audio + sample rate."""
         if not self._is_loaded:
             self.load()
 
         if self._generator is None:
             raise RuntimeError("StyleTTS 2 generator not loaded")
 
+        with torch.no_grad():
+            wav = self._generator.inference(
+                text=text,
+                target_voice_path=target_voice_path,
+                embedding_scale=embedding_scale,
+                alpha=alpha,
+                beta=beta,
+            )
+
+        if isinstance(wav, torch.Tensor):
+            wav = wav.cpu().numpy()
+
+        if wav.ndim > 1:
+            wav = wav.mean(axis=0)
+
+        if wav.max() > 1.0 or wav.min() < -1.0:
+            wav = wav / max(abs(wav.max()), abs(wav.min()))
+
+        return wav, 24000
+
+    def generate(
+        self,
+        text: str,
+        embedding_scale: float = 1.0,
+        alpha: float = 0.3,
+        beta: float = 0.7,
+    ):
+        """Generate speech with StyleTTS 2 (no cloning)."""
         logger.info(f"[STYLETTS2] text='{text[:50]}...'")
-
         try:
-            with torch.no_grad():
-                wav = self._generator.inference(
-                    text=text,
-                    target_voice_path=None,
-                    embedding_scale=embedding_scale,
-                    alpha=alpha,
-                    beta=beta,
-                )
-
-            if isinstance(wav, torch.Tensor):
-                wav = wav.cpu().numpy()
-
-            if wav.ndim > 1:
-                wav = wav.mean(axis=0)
-
-            if wav.max() > 1.0 or wav.min() < -1.0:
-                wav = wav / max(abs(wav.max()), abs(wav.min()))
-
-            sr = 24000
-            audio_b64 = self._audio_to_base64(wav, sr)
-
+            wav, sr = self._inference(text, None, embedding_scale, alpha, beta)
             duration = len(wav) / sr
             logger.info(f"[STYLETTS2] Generated: {duration:.2f}s @ {sr}Hz")
-
-            return GenerateResponse(audio=audio_b64, sample_rate=sr)
-
+            return wav, sr
         except Exception as e:
             logger.error(f"[STYLETTS2] Failed: {e}", exc_info=True)
             raise RuntimeError(f"StyleTTS 2 generation failed: {e}")
+
+    def generate_with_reference(
+        self,
+        text: str,
+        ref_audio_b64: str,
+        embedding_scale: float = 1.0,
+        alpha: float = 0.3,
+        beta: float = 0.7,
+    ):
+        """Generate speech with voice cloning from reference audio."""
+        import tempfile
+
+        logger.info(f"[STYLETTS2] voice cloning, text='{text[:50]}...'")
+
+        # Decode base64 to raw bytes
+        ref_bytes = base64.b64decode(ref_audio_b64)
+
+        # The ref audio may be a raw WAV file or just PCM — ensure it's a valid WAV
+        # by reading and re-writing it at the expected sample rate
+        try:
+            ref_audio_data, ref_sr = sf.read(BytesIO(ref_bytes))
+            logger.info(f"[STYLETTS2] Reference audio: {len(ref_audio_data)} samples @ {ref_sr}Hz")
+        except Exception as e:
+            logger.error(f"[STYLETTS2] Failed to decode reference audio: {e}")
+            raise RuntimeError(f"Invalid reference audio: {e}")
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            sf.write(tmp.name, ref_audio_data, ref_sr, format="WAV")
+            tmp_path = tmp.name
+
+        try:
+            wav, sr = self._inference(text, tmp_path, embedding_scale, alpha, beta)
+            duration = len(wav) / sr
+            logger.info(f"[STYLETTS2] Generated (cloned): {duration:.2f}s @ {sr}Hz")
+            return wav, sr
+        except Exception as e:
+            logger.error(f"[STYLETTS2] Voice cloning failed: {e}", exc_info=True)
+            raise RuntimeError(f"StyleTTS 2 voice cloning failed: {e}")
+        finally:
+            os.unlink(tmp_path)
 
     def _audio_to_base64(self, audio: np.ndarray, sample_rate: int) -> str:
         """Convert audio array to base64-encoded WAV."""
@@ -533,8 +581,7 @@ async def generate(request: GenerateRequest) -> GenerateResponse:
     params = request.styletts_params or StyleTTSParams()
     try:
         if request.ref_audio:
-            # Voice cloning mode
-            result = manager.generate_with_reference(
+            wav, sr = manager.generate_with_reference(
                 text=request.text,
                 ref_audio_b64=request.ref_audio,
                 embedding_scale=params.embedding_scale,
@@ -542,29 +589,19 @@ async def generate(request: GenerateRequest) -> GenerateResponse:
                 beta=params.beta,
             )
         else:
-            # Standard generation
-            result = manager.generate(
+            wav, sr = manager.generate(
                 text=request.text,
                 embedding_scale=params.embedding_scale,
                 alpha=params.alpha,
                 beta=params.beta,
             )
 
-        # Convert AudioResult to response
-        import base64
-        from io import BytesIO
-
         buffer = BytesIO()
-        import soundfile as sf
-
-        sf.write(buffer, result.audio, result.sample_rate, format="WAV")
+        sf.write(buffer, wav, sr, format="WAV")
         buffer.seek(0)
         audio_b64 = base64.b64encode(buffer.read()).decode()
 
-        return GenerateResponse(
-            audio=audio_b64,
-            sample_rate=result.sample_rate,
-        )
+        return GenerateResponse(audio=audio_b64, sample_rate=sr)
     except RuntimeError as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

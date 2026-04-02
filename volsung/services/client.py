@@ -42,7 +42,9 @@ DEFAULT_SERVICE_PORTS = {
     "sfx": 8004,
 }
 
-DEFAULT_TIMEOUT = 60.0  # seconds for long-running ML inference
+DEFAULT_TIMEOUT = (
+    600.0  # seconds (10 min) for long-running ML inference - TTS can take 5+ minutes
+)
 DEFAULT_CONNECT_TIMEOUT = 5.0  # seconds for connection establishment
 
 

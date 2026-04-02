@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 # Configuration
 # =============================================================================
 
-INDEXTTS2_REPO_ID = "IndexTeam/IndexTTS2"
+INDEXTTS2_REPO_ID = "IndexTeam/IndexTTS-2"
 
 
 class IndexTTSConfig(BaseModel):
@@ -195,7 +195,7 @@ class IndexTTS2Manager:
             }
 
         try:
-            from indextts.infer import IndexTTS as IndexTTS2
+            from indextts.infer_v2 import IndexTTS2
         except ImportError:
             raise ImportError(
                 "indextts is required. Install IndexTTS-2 from source."
@@ -219,8 +219,7 @@ class IndexTTS2Manager:
         self._generator = IndexTTS2(
             cfg_path=cfg_path,
             model_dir=model_dir,
-            is_fp16=(self._device != "cpu"),
-            device=self._device,
+            use_fp16=(self._device != "cpu"),
         )
 
         self._is_loaded = True
@@ -308,14 +307,14 @@ class IndexTTS2Manager:
 
             # Build kwargs for infer
             infer_kwargs = {
-                "ref_audio": ref_tmp.name,
+                "spk_audio_prompt": ref_tmp.name,
                 "text": text,
                 "output_path": out_tmp.name,
             }
 
             # Add emotion parameters if provided
             if emo_audio_path:
-                infer_kwargs["emo_audio"] = emo_audio_path
+                infer_kwargs["emo_audio_prompt"] = emo_audio_path
             if emo_vector is not None:
                 infer_kwargs["emo_vector"] = emo_vector
             if emo_text is not None:
@@ -418,7 +417,7 @@ async def health_check() -> dict:
     }
 
     try:
-        from indextts.infer import IndexTTS  # noqa: F401
+        from indextts.infer_v2 import IndexTTS2  # noqa: F401
 
         model_status["available"] = True
         if _manager is not None:

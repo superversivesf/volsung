@@ -21,6 +21,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy requirements first for better layer caching
 COPY requirements/services/chatterbox.txt /app/requirements.txt
 
+# Install numpy first (required by pkuseg's setup.py before pip can resolve it)
+RUN pip install --no-cache-dir numpy
+
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
